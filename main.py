@@ -1,0 +1,1047 @@
+# app.py
+"""
+FastHTML + HTMX starter: filters + sortable table + **row-based infinite scroll** (single page scroll)
+
+"""
+from __future__ import annotations
+import datetime
+from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
+import random
+from datetime import date, timedelta
+from time import perf_counter
+from typing import Callable, Any
+import urllib.parse
+import json
+from faker import Faker
+from fasthtml.common import *
+
+from starlette.staticfiles import StaticFiles
+
+
+from color_utils import ColorScale, best_text_color, MapPlotLibColorScale
+
+from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_dso_positions, get_data_for_dso_moon_chart, \
+    stellarium_object_types, DEFAULT_TIMEZONE
+
+# our data access layer
+from manage_dso_data import get_unique_constellations, load_dso_by_id, load_dso_subset, get_unique_classes, \
+        load_filter_localize_data
+
+# ----------------------------- App setup -------------------------------------
+app, rt = fast_app()
+# add a static files mount for CSS, JS, images, etc
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# # -------------------------- Fake dataset -------------------------------------
+# SEED          = 42
+# N_ROWS_TOTAL  = 1000
+PAGE_SIZE     = 50
+CLASSES    =  [('Cls', 'Cluster'), ('DS', 'Double Star'), ('Gal', 'Galaxy'), ('Neb', 'Nebula'), ('Oth', 'Other')] #FIXME ddx name from abbreviation in DB
+REGIONS       = ["All", "North", "South", "East", "West"]
+MAX_HOURS_VISIBLE = 6  # max for hours visible filter FIXME for whole night?
+
+db_path = Path("./dso_data.db")
+
+dso_classes = get_unique_classes(db_path=db_path)
+print(f"Unique DSO classes: {dso_classes}")
+# gets pairs of (abbr, full name)
+dso_constellation_name_pairs = [("all", "All Constellations")] + get_unique_constellations(db_path=db_path)
+print(f"Unique DSO constellation abbreviations: {dso_constellation_name_pairs}")
+
+
+
+def get_sensor_coverage(dso_min_axis: float, dso_maj_axis: float, 
+    sensor_width_amin: float = 21.5, sensor_height_amin: float = 14.3) -> int:
+    # updated to return in percent, not fraction
+    # approximate how relevant the size of the object will be in the view of the telescope
+    # all units are arcMINUTES
+    # use nova.astrometry.net to get the actual size of the camera + sensor in arcminutes
+    # for default, use 071 camera's 14.3amin x 21.5amin
+    # try: compare diagonal of view to the diagonal of dso
+
+    # need at least the major axis, and sensor size
+    if (dso_maj_axis and sensor_width_amin and sensor_height_amin):
+        sensor_diag = math.sqrt(sensor_height_amin**2 + sensor_width_amin**2)
+        dso_diag = math.sqrt(dso_min_axis**2 + dso_maj_axis**2)
+        return round(100 * (dso_diag / sensor_diag))
+    else:
+        return 0
+
+
+# ------------------------ Helpers: filtering/sorting -------------------------
+
+def _parse_bool(val: str|None, *, default=False) -> bool:
+    if val is None:
+        return default
+    return val in {"1", "true", "True", "on", "yes"}
+
+def get_loc(req):
+    qp = req.query_params
+    # localization data from form hidden inputs
+    loc = dict(
+        lat = qp.get("lat"),
+        lon = qp.get("lon"),
+        date = qp.get("date"),            # ISO string
+        hours_start = qp.get("hstart"),
+        hours_end   = qp.get("hend"),
+        fl_mm = qp.get("fl_mm"),
+        px_um = qp.get("px_um"),
+        rows  = qp.get("rows"),
+        cols  = qp.get("cols"),
+    )
+    # if lat or long or date missing, try cookie
+    if not loc['lat'] or not loc['lon'] or not loc['date']:
+        loc.update(read_loc_cookie(req))  # tiny parser
+
+    # make sure lat and long are floats
+    try:
+        loc['lat'] = float(loc['lat'])
+    except (TypeError, ValueError):
+        loc['lat'] = 38.76918  # powell
+    try:
+        loc['lon'] = float(loc['lon'])
+    except (TypeError, ValueError):
+        loc['lon'] = -94.65635  # powell
+    # date is ISO format YYYY-MM-DD
+    try:
+        date.fromisoformat(loc['date'])
+    except (TypeError, ValueError):
+        loc['date'] = date.today().isoformat()
+    
+    # also fl_mm, rows, cols as int
+    try:
+        loc['fl_mm'] = int(loc['fl_mm'])
+    except (TypeError, ValueError):
+        loc['fl_mm'] = 0
+
+    try:
+        loc['px_um'] = float(loc['px_um'])
+    except (TypeError, ValueError):
+        loc['px_um'] = 0.0  # default pixel size
+
+    try:
+        loc['rows'] = int(loc['rows'])
+    except (TypeError, ValueError):
+        loc['rows'] = 0
+
+    try:
+        loc['cols'] = int(loc['cols'])
+    except (TypeError, ValueError):
+        loc['cols'] = 0
+
+    return loc
+
+def read_loc_cookie(req):
+    # parse the cookie string
+    cookie = req.cookies.get("astro_loc", "")
+    decoded = urllib.parse.unquote(cookie)
+    data = json.loads(decoded)
+    print(f"Read loc cookie: {data}")
+
+    return dict(
+        lat=data.get("lat", 38.76918),
+        lon=data.get("lon", -94.65635),
+        date=data.get("date", date.today().isoformat()),
+        fl_mm=data.get("fl_mm", 0),
+        px_um=data.get("px_um", 0.0),
+        rows=data.get("rows", 0),
+        cols=data.get("cols", 0)
+    )
+
+def get_filters(req) -> dict:
+    # print(f"\nGet Filters Request URL: {req.url}")
+    # e.g. http://localhost:5001/table?q=lisa&region=All&active=any&cat_Gamma=on&min_score=0&max_score=100
+    qp = req.query_params
+    q = (qp.get("q") or "").strip()
+    a_constellation = qp.get("constellation") or "all"
+    constellation = [a_constellation] # convert item to list, with "all" meaning no filtering
+    active_sel = qp.get("active") or "any"
+    min_hours_viz = int(qp.get("min_hours_viz") or 0)
+    min_coverage = int(qp.get("min_coverage") or 0)
+    max_coverage = int(qp.get("max_coverage") or 1000)
+    # max_hours_viz = int(qp.get("max_hours_viz") or 24)
+    classes = [c[0] for c in CLASSES if _parse_bool(qp.get(f"class_{c[0]}"))]
+    # object_types = [t[0] for t in stellarium_object_types if _parse_bool(qp.get(f"object_type_{t[0]}"))]
+    # could handle lists but just one at a time for now
+    object_types = [t[0] for t in stellarium_object_types if t[0] == qp.get("object_type")]
+    sortname = qp.get("sortname") or "dso_id"
+    order = qp.get("order") or "asc"
+    d = dict(q=q, constellation=constellation, active_sel=active_sel,
+                min_hours_viz=min_hours_viz, min_coverage=min_coverage, max_coverage=max_coverage,
+                classes=classes, object_types=object_types, sortname=sortname, order=order)
+    print(f"get_filters returning {d}")
+    return d
+
+# ----------------------- UI builders (FastTags) ------------------------------
+
+# UI localization bar to show observer location, telescope, sensor, etc
+# opens a modal dialog to change settings
+
+def localization_bar(loc: dict, oob=False) -> FT:
+    # compute any derived values here (pixel scale, FOV, darkness window…)
+    return Div(id="locbar", cls="locbar",
+               hx_swap_oob="true" if oob else "false",)(
+        Div(
+            Strong(loc.get("site_name") or "Location"),
+            Br(), Span(f"{loc.get('lat')}, {loc.get('lon')}")
+        ),
+        Div(
+            Strong(loc.get("scope_name") or "Telescope"),
+            Br(), Span(f"FL {loc.get('fl_mm')} mm")
+        ),
+        Div(
+            Strong(loc.get("camera_name") or "Camera"),
+            Br(), Span(f"{loc.get('cols')}×{loc.get('rows')} @ {loc.get('px_um')}µm")
+        ),
+        Div(
+            Button("Change",
+                   id="change-loc",
+                   onclick="openLocDialog()"
+                   # used htmx but now using static <dialog> in <body>
+                   # hx_get=localization,      # see route below
+                   # hx_target="body",        # add dialog to body
+                   # hx_swap="beforeend",   # don't do "afterend" cause it will be outside body!
+                   # hx_push_url="false"
+                )
+        )
+    )
+
+def filter_form(filters: dict, loc: dict, oob=False) -> FT:
+    def classes_box(cat: tuple[str,str]) -> FT:
+        # cat is a tuple (abbreviation, full name)
+        # the abbreviation is used for actual filtering and sorting
+        checked = (cat[0] in filters["classes"])
+        return Label(
+            Input(type="checkbox", name=f"class_{cat[0]}", checked=checked, cls="filter-ctl"), f" {cat[1]}", cls="chk"
+        )
+
+    # Re-render table on filter submit; resets paging/sentinel
+    # note that Form(key-word-params)(children) works because FT is a builder.
+    #  params first, then children FT
+    # print(f"filter_form current sort/order: {filters.get('sort')} / {filters.get('order')}")
+    return Form(
+            id="filters-form",
+            hx_swap_oob="true" if oob else "false", # update with new Table other than full index page
+            # hx_get=table.to(frump="trump",sort=filters.get("sort", "ra_dd"), order=filters.get("order", "asc")),  # was index,  # was table
+            hx_get=table, # was index,  # was table
+            # have target include the current values of sort and order- doesnt work
+            # hx_params="*", 
+            hx_target="#table", # was "#content",  # was #table now includes filter and table
+            hx_swap="outerHTML",
+            hx_push_url="true",
+            # hx_trigger="change from:input, select, checkbox, radio, textarea",
+
+        )(
+        Fieldset(
+            Legend("Filters"),
+            Div(
+                Div(Label("Search", Input(name="q", value=filters["q"], placeholder="name contains…", cls="filter-ctl"))),
+                
+                # combo select only one at a time but db expects a list, with ['all'] meaning no filtering
+                Div(Label("Constellation", Select(name="constellation", cls="filter-ctl")( *[Option(c[1], value=c[0],
+                                selected=(filters["constellation"]==c[0])) for c in dso_constellation_name_pairs] ))),
+
+                Div(Label("Object Type", Select(name="object_type", cls="filter-ctl")( *[Option(c[1], value=c[0],
+                                selected=(filters["object_types"]==c[0])) for c in stellarium_object_types] ))),
+
+                # Div(Label("Active", Select(name="active", cls="filter-ctl")( 
+                #     Option("Any", value="any", selected=(filters["active_sel"]=="any")),
+                #     Option("Active", value="true", selected=(filters["active_sel"]=="true")),
+                #     Option("Inactive", value="false", selected=(filters["active_sel"]=="false")),
+                # ))),
+            cls="grid")
+        ),
+        Fieldset(
+            Legend("Classes"), Div(*[classes_box(c) for c in CLASSES], cls="cats"),
+        ),
+        Fieldset(cls="actions")(
+            Legend("Filters"),
+            Div(
+                Label(Safe("Min Hours Visible"), Input(type="number", name="min_hours_viz", value=str(filters["min_hours_viz"]), style="width:fit-content",
+                                     min="0", max=MAX_HOURS_VISIBLE, step=1, cls="filter-ctl")),
+                # Label("Max"), Input(type="number", name="max_hours_viz", value=str(filters["max_hours_viz"]), min=0, max=24, step=1, cls="filter-ctl"),
+                cls="range"
+            ),
+            Div(
+                Label("Min FOV %", Input(type="number", name="min_coverage", value=str(filters["min_coverage"]), style="width:fit-content",
+                                     min="0", max="1000", step=10, cls="filter-ctl")),
+                # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
+                cls="range"
+            ),
+            Div(
+                Label("Max FOV %", Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), style="width:fit-content",
+                                     min="0", max="1000", step=10, cls="filter-ctl")),
+                # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
+                cls="range"
+            )
+        ),
+
+        # Hidden localization inputs:
+        Input(type="hidden", name="lat",     value=loc.get("lat") or ""),
+        Input(type="hidden", name="lon",     value=loc.get("lon") or ""),
+        Input(type="hidden", name="date",    value=loc.get("date") or ""),
+        Input(type="hidden", name="hstart",  value=loc.get("hstart") or ""),
+        Input(type="hidden", name="hend",    value=loc.get("hend") or ""),
+        Input(type="hidden", name="fl_mm",   value=loc.get("fl_mm") or ""),
+        Input(type="hidden", name="px_um",   value=loc.get("px_um") or ""),
+        Input(type="hidden", name="rows",    value=loc.get("rows") or ""),
+        Input(type="hidden", name="cols",    value=loc.get("cols") or ""),
+
+        # add fields to save sort (now "sortname") and order (get persisted into localStorage by JS)
+        Input(type="hidden", name="sortname", value=filters.get("sortname") or "ra_dd"),
+        Input(type="hidden", name="order",    value=filters.get("order") or "asc"),
+
+        # Div(id="button-container")(
+        #     Button("Apply", id="apply-filters", type="submit", hx_scroll="closest #button-container"),
+        #     A("Reset", href=index, cls="secondary"),
+        #     cls="actions",
+        # )
+        Div(id="button-container")(
+            Button("Apply", id="apply-filters", type="submit", hx_scroll="this"),
+            Button("Reset", cls="secondary", type="button", onclick="window.location.href='/'"),
+            cls="actions",
+        )
+    )
+
+# Simple no dependents
+SCORE_SCALE = ColorScale(
+    vmin=15, vmax=50,
+    colors=["#a50026", "#ffff00", "#1a9850"],
+    gamma=0.5, # bias toward the upper end a bit
+    space='srgb' # interpolate in linear light for smoother blends
+)
+
+
+# using Matplotlib's extensive color mapping
+CS_ALT = MapPlotLibColorScale(
+    model = "Greens",
+    vmin=0, vmax=80, 
+)
+
+# configuration stuff - column names, etc
+RenderTdFn   = Callable[["ColumnConfig", dict], FT]
+GetHeaderFn = Callable[["ColumnConfig",dict], str] # doesnt gen the TH at this point, just the content
+
+# helper functions
+
+def extract_dt(dt) -> str:
+    # format like "20 Dec 2025 <br> 9:45 PM"
+    if isinstance(dt, datetime):
+        return dt.strftime("%d %b %Y<br>%I:%M %p")
+    else:
+        return "????<br>????"
+
+def merge_styles(*parts: Optional[str]) -> str:
+    # join non-empty bits with semicolons, keep order, avoid duplicates
+    bits = [p.strip().rstrip(';') for p in parts if p and p.strip()]
+    return '; '.join(bits) + (';' if bits else '')
+
+def default_Td(col: ColumnConfig, row: dict) -> FT:
+    """Default TD renderer that honors col.width / col.style / col.cls and col.color_scale."""
+    attrs = {}
+    style_accum = []
+
+    if col.width:
+        style_accum.append(f"width:{col.width}")
+    if col.style:
+        style_accum.append(col.style)
+
+    val = row.get(col.name)
+    if col.color_scale and val is not None:
+        rgb = col.color_scale.as_rgb_tuple(val)
+        bg  = col.color_scale.as_css_rgba(val)
+        fg  = best_text_color(rgb)
+        style_accum.append(f"background:{bg}")
+        style_accum.append(f"color:{fg}")
+
+    style_str = merge_styles(*style_accum)
+    if style_str:
+        attrs['style'] = style_str
+    if col.cls:
+        attrs['class'] = col.cls
+
+    return Td(Safe(val), **attrs)
+
+def altAzi_Td(col: ColumnConfig, row: dict) -> FT:
+    """Custom TD for alt/azitude that honors col.width / col.style / col.cls and col.color_scale.
+       Uses colname_azi as a numeric value for color scaling, but colname for display.
+    """
+    attrs = {}
+    style_accum = []
+
+    if col.width:
+        style_accum.append(f"width:{col.width}")
+    if col.style:
+        style_accum.append(col.style)
+
+    val = row.get(col.name)
+    color_val = row.get(col.name + "_alt")  # numeric value for altitude color scale
+    if col.color_scale and color_val is not None and color_val >= MIN_ALT_FOR_COLOR:
+        rgb = col.color_scale.as_rgb_tuple(color_val)
+        bg  = col.color_scale.as_css_rgba(color_val)
+        fg  = best_text_color(rgb)
+        style_accum.append(f"background:{bg}")
+        style_accum.append(f"color:{fg}")
+
+    style_str = merge_styles(*style_accum)
+    if style_str:
+        attrs['style'] = style_str
+    if col.cls:
+        attrs['class'] = col.cls
+
+    return Td(Safe(val), **attrs)
+
+@dataclass
+class ColumnConfig:
+    name: str  # the index/key in the data dict
+    width: Optional[str] = None  # style string like "8%"' or '"clamp(100px, 10%, 200px)"'
+    style: Optional[str] = None  # other style string like 'text-align:right;'
+    sortable: bool = True
+    hdr_cls: Optional[str] = "nowrap"  # optional class for the header TH
+    cls: Optional[str] = None  # optional class for the column
+    color_scale: Optional["MapPlotLibColorScale"] = None
+    header_fn: Optional[GetHeaderFn] = None # custom header generator
+    renderTd_fn: Optional[RenderTdFn] = None # custom cell renderer
+
+    # these are the endpoints to use when generating the table
+    # get the header content (not the TH itself)
+    def get_header(self, row: dict) -> str:
+        if self.header_fn:
+            return self.header_fn(self, row) # if we have a custom header function, use it
+        # default is just the name capitalized
+        return self.name.capitalize()
+
+    # function to render the TD cell for this column
+    def render_Td(self, row: dict) -> FT:
+        if self.renderTd_fn:
+            return self.renderTd_fn(self, row) # if we have a custom renderer, use it
+        # default is just the value as a string
+        # use the default TD renderer that honors width/style/cls/color_scale
+        return default_Td(self, row)
+
+
+COL_FIGS: list[ColumnConfig]= [
+
+    # ColumnConfig(name = "dso_id", width = "4%", style=None, cls=None, sortable=True, color_scale=None,
+    #     header_fn = lambda col, row: "Id",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
+
+    ColumnConfig(name = "name", width = "14%", style=None, hdr_cls="wrap", cls="wrap", sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Name",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+
+    ColumnConfig(name = "catalog", width = "5%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Cat",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+
+    ColumnConfig(name = "class", width = "4%", style=None, cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Class",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+
+    ColumnConfig(name = "type", width = "4%", style=None, cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Type",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+
+    ColumnConfig(name = "constellation_abbr", width = "4%", style=None, cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Cons",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+
+    # ColumnConfig("mag", "Magnitude", "6%", None, True, None),
+
+    # ColumnConfig("size", "Size", "12%", None, False, None), # nn x nn
+    ColumnConfig(name="coverage", width="4%", style=None, cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "FOV %",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+
+    ColumnConfig(name="rise", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Rise",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+    ColumnConfig(name="transit", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Trans",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+    ColumnConfig(name="set", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Set",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+
+    ColumnConfig(name="score", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=CS_ALT,
+        header_fn = lambda col, row: "SCR",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+
+    ColumnConfig(name="hours_viz", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Viz",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+
+    # ColumnConfig("score", "4%", "text-align:center;", True, None,
+    #     get_header=lambda row: "Score",
+    #     render_TD=lambda row: get_TD(row, "score", "4%", "text-align:center;", color_scale=CS_ALT)),
+
+    # # five more data / time columns algorithmically generated
+
+    ColumnConfig(name="obsTime0", width="9%", style="text-align:center;padding:2px 2px;",
+                  cls=None, sortable=False, color_scale=CS_ALT,
+        header_fn = lambda c, row: extract_dt(row.get("obsTime0_dt")),
+        renderTd_fn = lambda col, row: altAzi_Td(col, row)
+    ),
+    ColumnConfig(name="obsTime1", width="9%", style="text-align:center;padding:2px 2px;",
+                  cls=None, sortable=False, color_scale=CS_ALT,
+        header_fn = lambda c, row: extract_dt(row.get("obsTime1_dt")),
+        renderTd_fn = lambda col, row: altAzi_Td(col, row)
+    ),
+    ColumnConfig(name="obsTime2", width="9%", style="text-align:center;padding:2px 2px;",
+                  cls=None, sortable=False, color_scale=CS_ALT,
+        header_fn = lambda c, row: extract_dt(row.get("obsTime2_dt")),
+        renderTd_fn = lambda col, row: altAzi_Td(col, row)
+    ),
+    ColumnConfig(name="obsTime3", width="9%", style="text-align:center;padding:2px 2px;",
+                  cls=None, sortable=False, color_scale=CS_ALT,
+        header_fn = lambda c, row: extract_dt(row.get("obsTime3_dt")),
+        renderTd_fn = lambda col, row: altAzi_Td(col, row)
+    ),
+    ColumnConfig(name="obsTime4", width="9%", style="text-align:center;padding:2px 2px;",
+                  cls=None, sortable=False, color_scale=CS_ALT,
+        header_fn = lambda c, row: extract_dt(row.get("obsTime4_dt")),
+        renderTd_fn = lambda col, row: altAzi_Td(col, row)
+    ),
+    ColumnConfig(name="obsTime5", width="10%", style="text-align:center;padding:2px 2px;",
+                  cls=None, sortable=False, color_scale=CS_ALT,
+        header_fn = lambda c, row: extract_dt(row.get("obsTime5_dt")),
+        renderTd_fn = lambda col, row: altAzi_Td(col, row)
+    ),
+]
+
+# rename to render_sortable_header??
+def sort_header(col_config: ColumnConfig, sortname: str, order: str, rows: list[dict]) -> FT:
+
+    # sort is name of current sort column
+    # order is now "asc" or "desc"
+    # fake row for testing
+
+    nxt   = "desc" if (sortname == col_config.name and order == "asc") else "asc"
+    arrow = "▲" if sortname == col_config.name and order == "asc" else ("▼" if sortname == col_config.name else "&nbsp;")
+
+    if not col_config.sortable:
+        return Th(cls=col_config.hdr_cls or "nowrap",
+                  style="text-align:center;"
+                )(Safe(col_config.get_header(rows[0]) + "<br>&nbsp;"))  # allow <br> in header
+
+    return Th(cls=col_config.hdr_cls or "nowrap",
+              style="text-align:center;"
+            )(
+                Button(
+                    Span(Safe(col_config.get_header(rows[0]) + "<br>" + arrow)),
+                    type="button",
+                    cls="linklike clicksort",
+                    style="text-align:center;",
+                    # hx_get=index.to(sort=col_config.name, order=nxt),
+                # hx_target="#content",            hx_get=index.to(sort=col_config.name, order=nxt),
+                hx_get=table.to(sortname=col_config.name, order=nxt),
+                hx_target="#table",
+                hx_swap="outerHTML",
+                hx_push_url="true",
+                hx_include="#filters-form",
+                onclick="setSort(" + "'" + col_config.name + "'" + ")"
+                )
+            )
+
+def render_rows(rows: list[dict], localization:dict) -> list[FT]:
+    trs: list[FT] = []
+    print(f"Render Rows starting with {len(rows)} rows and localization {localization}")
+    
+    for r in rows:
+        
+        # rgb = CS_ALT.as_rgb_tuple(r["score"])
+        # bg  = CS_ALT.as_css_rgba(r["score"])
+        
+        # fg = best_text_color(rgb)
+
+        # Row is clickable: navigate to detail page for this id
+        # pass along localization info
+        href = detail.to(dso_id=r["dso_id"], **localization)
+
+        tr = Tr(
+            *[col.render_Td(r) for col in COL_FIGS]
+        )
+
+        # Make the whole row clickable
+        tr.attrs.update({
+            'onclick': f"window.location='{href}'",
+            'style': (tr.attrs.get('style','') + ' cursor:pointer;').strip()
+        })
+        trs.append(tr)
+    # print(f"Render Rows prepared {len(trs)} rows")
+    # print(f"Last row: {trs[-1] if trs else 'none'}")
+    return trs
+
+def apply_sentinel(trs: list[FT], *, next_page:int, has_more:bool, sortname:str, order:str):
+    """Adds a sentinel row that uses HTMX to append the next page after itself."""
+    # generates call like:
+    # http://localhost:5001/rows?page=4&sort=id&order=desc&q=&region=All&active=any&min_score=0&max_score=100
+    if not trs:
+        return
+    
+    # this version adds a separate sentinel row at the end, using SWAP outerHTML to replace itself
+    # but it still has the weird scroll jump when it loads so Use the GPT script fix instead
+
+    if has_more:
+        # add a new row as the sentinel
+        new_row = Tr(
+            Td("Loading more…", colspan=str(len(COL_FIGS)), style="text-align:center; font-style:italic;"))
+        new_row.attrs.update({
+            'hx-get': rows.to(page=next_page, sortname=sortname, order=order),
+            # 'revealed once' is okay; 'intersect' is a bit stricter:
+            # 'hx-trigger': 'intersect once threshold:0 rootMargin:0px 0px -20% 0px',
+            'hx-trigger': 'intersect once threshold:0',
+            'hx-swap': 'outerHTML', # replace self
+            'hx-include': '#filters-form'
+        })
+        trs.append(
+            new_row
+        )
+    else:
+        # optional styling for end marker; keep it a plain row
+        # last.attrs.update({'class': (last.attrs.get('class','') + ' end-of-results').strip()})
+        trs.append(
+            Tr(
+                Td("End of results", colspan=str(len(COL_FIGS)), style="text-align:center; font-style:italic;")
+            )
+        )
+
+# ------------------------------- Routes --------------------------------------
+
+@rt
+def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
+    # note index handles http initial load as well as htmx table update
+
+    # get localization from hidden fields in query request
+    loc = get_loc(req)  # TODO: cookie fallback
+    
+    # get filters from query params
+    filters = get_filters(req)
+
+    # define content area that gets updates
+    # pattern is FT(key-params)(children)
+    content = Div(id="content", cls="container")(
+        localization_bar(loc),
+        filter_form(filters, loc, oob=False),  # full update when index is called
+        table(req, sortname=sortname, order=order, update_localization=False)
+    )
+
+    # If this is an HTMX request, return only the inner content fragment
+    # should not happen now
+    if req.headers.get("HX-Request"):
+        print(f"Got /index HTMX request with sort:{sortname} and returning #content fragment")
+        return content
+
+    # Otherwise return the full page
+    print(f"Got FULL /index HTTP request with sort:{sortname} and returning full page")
+
+    return Titled(
+        "FastHTML + HTMX Demo",
+        Link(rel="stylesheet", href="/static/app.css?v=1"),
+        content,
+
+        # Static dialog included once; it stays in DOM between opens
+        # use starlette StaticFiles mount at /static/ for scripts, css, images, etc
+
+        Dialog(id="loc-dialog", cls="modal")(
+            Div(cls="layout")(
+                H2("Change localization"),
+                Div(cls="body")(
+                    Form(id="loc-form")(
+                        Div(cls="grid2")(
+                            Label("Site name",   Input(name="site_name")),
+                            Label("Date",        Input(type="date", name="date")),
+                            Label("Latitude",    Input(name="lat")),
+                            Label("Longitude",   Input(name="lon")),
+                            Label("Start hour",  Input(name="hstart")),
+                            Label("End hour",    Input(name="hend")),
+                            Label("Focal length (mm)", Input(name="fl_mm")),
+                            Label("Pixel size (µm)",   Input(name="px_um")),
+                            Label("Sensor rows", Input(name="rows")),
+                            Label("Sensor cols", Input(name="cols")),
+                        )
+                    )
+                ),
+                Div(cls="footer")(
+                    Button("Save", type="button", id="save-loc"),
+                    Form(method="dialog")(Button("Cancel"))
+                )
+            )
+        ),
+
+        # use of "module" means these scripts are NOT global to window object
+        # use listener in static/scripts.js to bind click events, etc.
+        # or set windows.xxxx = xxxxx
+        Script(src="/static/scripts.js?v=6", type="module", defer=True),
+    )
+
+
+@rt
+def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization: bool = True):
+    """Render the FULL table with the first page and a row-sentinel at the end."""
+    # sort is the name of the column to sort on
+
+    # we need to fetch all the data to get proper column headers for dynamic ones
+    # but we only render the first page of rows here
+    # pass raw_data to rows() so it doesn't reload the data again
+    # when rows is called from htmx, it will load the data itself
+
+    # localization is whether to include the localization bar (oob) or not
+
+    filters     = get_filters(req)
+    localization = get_loc(req)  # TODO: cookie fallback
+    
+    print(f"---->>>>loading raw data for /table with sortname:{sortname}, order:{order}")
+    raw_data = load_filter_localize_data(db_path, filters, localization, sortname, order)
+
+    trs = rows(req, page=1, sortname=sortname, order=order, raw_data=raw_data)  # call the route function directly to get first page
+
+    # if there are no rows, return an empty table with no headers since we need rows to get dynamic headers
+    if not trs or len(raw_data) == 0:
+        return Table(id="table", cls="striped")(
+            Colgroup(*[
+                (Col(style=f"width:{cf.width}") if cf.width else Col())
+                    for cf in COL_FIGS
+            ]),
+            Thead(
+                Tr(Th("No results match the filter criteria.",
+                       colspan=str(len(COL_FIGS)), style="text-align:center; font-style:italic;"))
+            )
+        )
+
+    # maybe this DIV breaks things with hx-swap=outerHTML?
+    # return
+        # filter_form(get_filters(req), get_loc(req)),  # re-render filter form to preserve current values,
+        # table with first page of rows and sentinel
+        # filter_form(filters, localization, oob=True),  \
+
+    table_ft =  Table(id="table", cls="striped")(
+            Colgroup(*[
+                (Col(style=f"width:{cf.width}") if cf.width else Col())
+                    #for w in COL_WIDTHS
+                    for cf in COL_FIGS
+            ]),
+            Thead(
+                # these are the column headers, some are sortable
+                # some have dynamic names (the observation time columns)
+                Tr(
+                    # the "'*" unpack" unpacks the tuples into individual positional args
+                    *(sort_header(cf, sortname, order, raw_data) for cf in COL_FIGS)
+                )
+            ),
+            Tbody(*trs)
+            )
+
+    if update_localization:
+        return localization_bar(localization, oob=True), table_ft
+    else:
+        return table_ft
+
+
+# called by HTMX when the sentinel row is revealed
+# also called internally to get the initial tbody rows
+
+# def rows(req, page: int = 2, sort: str = "dso_id", order: str = "asc", row_data:list[dict]|None=None) -> tuple[FT,...]:
+@rt
+def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc", raw_data: list[dict]|None = None): #  -> tuple[FT,...]:
+    """Return the *next page* of <tr> elements. The last <tr> becomes the new sentinel.
+    Since the triggering row uses hx-swap=afterend, these rows are inserted after it.
+    """
+    # is this an HTMX request?
+    if req.headers.get("HX-Request"):
+        print(" /rows called WITH HTMX request headers;")
+        print("raw data has len(raw_data) rows:", len(raw_data) if raw_data else 'None')
+    else:
+        print(" /rows called WITHOUT HTMX request headers;")
+        print("raw data has len(raw_data) rows:", len(raw_data) if raw_data else 'None')
+
+    print(f"Entering HTMX rows request for: page={page}, sort={sortname}, order={order}")
+    # print(f"rows call has row_data: {row_data}")
+
+    # if we already have the data (on index page fetch), use it; otherwise (htmx) load from DB
+    if raw_data is not None:
+        print(f"Using passed raw_data with {len(raw_data)} rows. Request: {req.query_params}")
+        localization = get_loc(req)
+        print(f"Using localization: {localization}")
+        # FIXME should sort the raw_data here using cookie values for loc??
+        sorted_rows = raw_data
+    else:
+        filters     = get_filters(req)
+        localization = get_loc(req)  # TODO: cookie fallback
+        print(f"loading raw data for HTMX ROWS page {page} Request: {req.query_params} ")
+        sorted_rows = load_filter_localize_data(db_path, filters, localization, sortname, order)
+
+    print(f"After filtering, {len(sorted_rows)} rows match criteria")
+    
+    start = (page - 1) * PAGE_SIZE
+    end   = start + PAGE_SIZE
+    chunk = sorted_rows[start:end]
+
+    if not chunk:
+        # Nothing left; return an empty tuple so nothing is inserted
+        return tuple()
+
+    trs = render_rows(chunk, localization)
+    has_more  = end < len(sorted_rows)
+    next_page = page + 1
+    apply_sentinel(trs, next_page=next_page, has_more=has_more, sortname=sortname, order=order)
+
+    # Defensive check: ensure trs is a list of FastHTML components
+    if not isinstance(trs, list):
+        raise TypeError(f"Expected trs to be a list, got {type(trs)}")
+    for i, tr in enumerate(trs):
+        # Check for FastHTML component by presence of 'attrs' and '__class__'
+        if not hasattr(tr, 'attrs') or not hasattr(tr, '__class__'):
+            raise TypeError(f"Element at index {i} in trs is not a FastHTML component: {tr}")
+
+    print(f"Returning {len(trs)} <tr> rows for page {page} (has_more={has_more})")
+    print(f"Last row: {trs[-1] if trs else 'none'}")
+    return trs # this broke things: return tuple(trs)
+
+
+@rt
+def detail(req, dso_id: str, localization: dict = {}) -> FT:
+    """Simple detail page placeholder. Normal navigation (not HTMX) so the browser's
+    Back button returns to the exact table state (filters/sort preserved).
+
+    Localization info is passed as query params to be used by detail graphics
+    url ends up like this:
+    GET /detail?dso_id=6459&lat=38.76918&lon=-94.65635&date=2025-10-02&hours_start=&hours_end=&fl_mm=835&px_um=3.76&rows=4176&cols=6248
+    """
+    print(f"Detail page request for dso_id={dso_id}, loc={localization}") # fastHTML auto unpacks into dict!
+    print(f"Detail request query params: {req.query_params}") # this works as well as the localization dict
+    
+    row = load_dso_by_id(dso_id, db_path)
+    if not row:
+        return Titled("Not Found", P("No record with that id."))
+
+    # todo add localization values for "now" and the current location
+    # loc = get_loc(req)  # TODO: cookie fallback
+    date = localization.get("date") or datetime.date.today().isoformat() # just 2025-10-02 eg
+    alt_date = req.query_params.get("date")
+    if alt_date != date:
+        print(f"Surprise alt-date via query param = {alt_date}")
+
+    lat  = localization.get("lat") or "0"
+    lon  = localization.get("lon") or "0"
+    tz  = localization.get("tz") or "America/Chicago"
+    
+    # Back button (uses history) + fallback link to the table root
+    backbar = Div(
+        Button("← Back to table", cls="linklike", onclick="history.back()"),
+        Span(" · "),
+        A("Open table", href=index),
+        cls="backbar"
+    )
+
+    details = Table(cls="striped")(
+        Thead(Tr(Th("Field"), Th("Value"))),
+        Tbody(
+            Div(
+                Tr(Td("dso_id"), Td(str(row["dso_id"]))),
+                Tr(Td("name"), Td(row["name"])),
+                Tr(Td("catalog"), Td(row["catalog"])) ,
+                Tr(Td("constellation"), Td(row["constellation"])),
+                Tr(Td("class"), Td(row["class"])),
+                Tr(Td("type"), Td(row["type"])),
+                Tr(Td("RA Degrees"), Td(f"{row['ra_dd']:.4f}")),
+                Tr(Td("DEC degrees"), Td(f"{row['dec_dd']:.4f}")),
+                Tr(Td("Date"), Td(date)),
+                Tr(Td("Latitude"), Td(lat)),
+                Tr(Td("Longitude"), Td(lon)),
+            ),
+        ),
+    )
+
+    ra_dec_d3 = Div(
+        Span("Chart (based on current localization):", cls="chart-label"),
+        Div(
+            # This method just injects a script tag that dynamically imports the chart module and runs it
+            # passing the div id to render into and the parameters
+            # compare to the htmx method below
+            # this may be simpler for many cases!
+            Div("Loading chart...", cls="loading", id="chart-container"),
+            Script(f"""
+                (async function() {{
+                    const {{ initChartFromAPI }} = await import('/static/dso_chart_fetch.js');
+                    initChartFromAPI('chart-container', '{dso_id}', {{
+                        lat: {lat},
+                        lon: {lon},
+                        date: '{date}',
+                        tz: '{tz}'
+                    }});
+                }})();
+            """),   
+            id="chart-wrapper"
+        )
+    )
+
+    dso_moon_d3 = Div(
+        Span("DSO altitude vs Moon illumination", cls="chart-label"),
+        Div(
+            # This method uses htmx to trigger loading the chart data once the div is visible
+            # JS code intercepts the afterRequest event to load and render the chart
+            # use data-* attributes to pass parameters to the JS code
+            # the /nonexistent hx-get is just a dummy to trigger the event (works either way)
+            Div("Loading dso-moon chart...", cls="loading", id="dso-moon-container",
+                hx_trigger="intersect once",  # Triggers when element becomes visible
+                hx_get="/nonexistent",  # Any URL, we don't care about the response
+                hx_swap="afterbegin",  # This should trigger afterRequest event
+                data_dso_id=dso_id, 
+                data_lat=lat, 
+                data_lon=lon, 
+                data_date=date, 
+                data_tz=tz
+            ),
+            id="moon-wrapper"
+        )
+    )
+
+    return Titled(
+        f"Details for ID {row['name']} (id:{dso_id})",
+        Script(src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"),
+        Script(src="https://cdnjs.cloudflare.com/ajax/libs/suncalc/1.9.0/suncalc.min.js"),
+        Script(src="/static/scripts.js?v=5", type="module", defer=True),
+
+        Div(backbar, details, ra_dec_d3, dso_moon_d3, cls="container")
+    )
+
+## routines for showing d3 RA/Dec chart in detail page
+# Simple API endpoint for chart data
+@rt('/api/dso/{dso_id}/positions')
+def get_dso_positions(dso_id: str, 
+                      lat: float = 38.9, 
+                      lon: float = -94.6,
+                      date: Optional[str] = None,
+                      tz: str = DEFAULT_TIMEZONE):
+    """
+    API endpoint that returns JSON data
+    date: YYYY-MM-DD format (interpreted as local date in the given timezone)
+    tz: IANA timezone string (e.g., 'America/Chicago', 'America/New_York')
+    """
+    # Parse date string as a date in the specified timezone
+    if date:
+        # Parse as naive date, then make it timezone-aware at midnight
+        naive_date = datetime.strptime(date, '%Y-%m-%d')
+        obs_date = naive_date.replace(tzinfo=ZoneInfo(tz))
+    else:
+        # Get current date/time in the specified timezone
+        obs_date = datetime.now(ZoneInfo(tz))
+    
+    # fetch dso data
+    dso_data = load_dso_by_id(dso_id, db_path=Path("./dso_data.db"))
+    if not dso_data:
+        raise ValueError("DSO not found")
+
+    # FIXME clean this up with less complex routine
+    dso, data_points = calculate_dso_positions(dso_data, lat, lon, obs_date)
+
+    # FIXME with how many hours to show
+    observer_hours = {
+        'start': '19:00',
+        'end': '05:00'
+    }
+    
+    return {
+        'data': data_points,
+        'dso_name': dso['name'],
+        'dso_id': dso['dso_id'],
+        'obs_lat': lat,
+        'obs_long': lon,
+        'obs_date': obs_date.isoformat(),  # Includes timezone
+        'timezone': tz,
+        'observer_hours': observer_hours,
+        'safe_alt': 20
+    }
+
+@rt('/api/dso-moon-chart-data/{dso_id}/localization')
+def get_dso_moon_chart_data(dso_id: str, lat: float, lon: float, date: str, tz: str):
+    """
+    API endpoint that returns JSON data for the DSO moon chart
+    """
+    # fetch dso data
+    dso_data = load_dso_by_id(dso_id, db_path=Path("./dso_data.db"))
+    if not dso_data:
+        raise ValueError("DSO not found")
+
+    # Parse date string as a date in the specified timezone
+    if date:
+        # Parse as naive date, then make it timezone-aware at midnight
+        naive_date = datetime.strptime(date, '%Y-%m-%d')
+        obs_date = naive_date.replace(tzinfo=ZoneInfo(tz))
+    else:
+        # Get current date/time in the specified timezone
+        obs_date = datetime.now(ZoneInfo(tz))
+
+    # Fetch DSO and moon sample data for 9pm local time
+    dso_moon_data = get_data_for_dso_moon_chart(dso_data, lat, lon, obs_date,
+                                                sample_hour=21, tz=tz)
+    if not dso_moon_data:
+        raise ValueError("DSO moon data not found")
+    print(f"Ready to return moon chart data {dso_moon_data}")
+    return dso_moon_data
+
+@rt('/nonexistent') # dummy endpoint for hx-get in detail page
+def do_nothing():
+    """This endpoint does nothing; it's just a placeholder for hx-get in the detail page."""
+    print("Called /nonexistent endpoint - doing nothing")
+    return ""
+
+####
+# Celestial "sky map" stuff from Claude
+# @app.get("/")
+# def home():
+#     return Html(
+#         Head(Title("Astronomy Tools")),
+#         Body(
+#             H1("Astronomy Tools"),
+#             A("Open Sky Map", href="/sky-map", target="_blank"),
+#         )
+#     )
+
+@app.get("/sky-map")
+def sky_map_page():
+    # Serve your HTML template
+    with open('./static/sky-map.html', 'r') as f:
+        return f.read()
+
+@app.get("/api/sky-map-data")
+def get_sky_map_data():
+    # Load your GeoJSON files
+    def load_geojson(filename):
+        with open(f'./data/{filename}', 'r') as f:
+            return json.load(f)
+    
+    def load_starnames():
+        with open('./data/starnames.json', 'r') as f:
+            return json.load(f)
+    
+    # Get observer location from session/preferences
+    observer_lat = 40.0  # Default or from user prefs
+    observer_long = -105.0
+    
+    return {
+        "stars6": load_geojson("stars.6.json"),
+        "constellationLines": load_geojson("constellation.lines.json"),
+        "constellationBounds": load_geojson("constellation.bounds.json"),
+        "messier": load_geojson("messier.json"),
+        "starnames": load_starnames(),
+        "observerLat": observer_lat,
+        "observerLong": observer_long
+    }
+
+# ------------------------------ Run server -----------------------------------
+serve()

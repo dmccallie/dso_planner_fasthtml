@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+<title>D3 — RA/Dec with Compass-up & Zenith-up (Kansas City, 10pm CDT)</title>
+<style>
+  html, body { margin:0; height:100%; background:#0b0f14; color:#eaeef3; font:14px/1.35 system-ui, -apple-system, Segoe UI, Roboto; }
+  #ui { position:fixed; top:10px; left:10px; background:#111a23; padding:10px 12px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,.35); display:flex; gap:.75rem; align-items:center; }
+  #ui label { display:inline-flex; align-items:center; gap:.4rem; }
+  #info { position:fixed; top:10px; right:10px; background:#111a23; padding:10px 12px; border-radius:8px; box-shadow:0 2px 10px rgba(0,0,0,.35); white-space:nowrap; }
+  svg { display:block; width:100vw; height:100vh; }
+  .star { fill:#e6f0ff; }
+  .label { fill:#c8d5e6; font-size:12px; pointer-events:none; }
+  .graticule { stroke:#1b2a3a; stroke-opacity:.85; fill:none; }
+  .axis { stroke:#5ea1ff; stroke-width:1.5; fill:none; }
+</style>
+
+<div id="ui">
+  <label>
+    Up mode:
+    <select id="upMode">
+      <option value="zenith" selected>Zenith-up (local up at center)</option>
+      <option value="compass">Compass-up (NCP points to screen-up at center)</option>
+    </select>
+  </label>
+  <label>
+    Drag sensitivity:
+    <input id="sens" type="range" min="0.05" max="1.0" step="0.05" value="0.25">
+  </label>
+</div>
+
+<div id="info"></div>
+<svg id="scene"></svg>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script>
+(() => {
+  const svg = d3.select("#scene");
+  const W = window.innerWidth, H = window.innerHeight;
+  const cx = W/2, cy = H/2;
+
+  // --- Observer: Kansas City, MO ---
+  const OBS = {
+    latDeg: 39.0997,
+    lonDeg: -94.5786 // West negative
+  };
+
+  // --- Time: 10:00 PM Central (CDT UTC-5) on 2025-10-06 -> 2025-10-07 03:00 UTC ---
+  // (We hardcode UTC to avoid browser timezone differences.)
+  const utcDate = new Date(Date.UTC(2025, 9, 7, 3, 0, 0)); // months 0-based; 9=October
+
+  // --- State (view) ---
+  let viewYawDeg = 0;     // left/right (deg)
+  let viewPitchDeg = 0;   // up/down (deg)
+  let upMode = 'zenith';  // 'zenith' or 'compass'
+  let degPerPixel = +document.getElementById('sens').value; // sensitivity
+
+  const radius = Math.min(W, H) * 0.42;
+  const fov = 1.2;
+
+  // --- Helpers ---
+  const DEG = Math.PI / 180;
+  const rad  = d => d * DEG;
+  const deg  = r => r / DEG;
+  const wrap = d => ((d + 180) % 360 + 360) % 360 - 180;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const dot   = (a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+  const cross = (a,b)=>[a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+  const norm  = v => { const n = Math.hypot(...v)||1; return [v[0]/n,v[1]/n,v[2]/n]; };
+
+  // RA/Dec (deg) -> unit vector in equatorial frame (+Z = NCP)
+  function vecFromRaDec(raDeg, decDeg) {
+    const a = rad(raDeg), d = rad(decDeg);
+    const cd = Math.cos(d), sd = Math.sin(d);
+    const ca = Math.cos(a), sa = Math.sin(a);
+    return [cd*ca, cd*sa, sd];
+  }
+
+  // Julian Date (UTC)
+  function julianDate(dateUTC) {
+    return dateUTC.getTime()/86400000 + 2440587.5;
+  }
+
+  // GMST (deg) using a standard approximation; LST = GMST + longitude
+  function gmstDeg(dateUTC) {
+    const JD = julianDate(dateUTC);
+    const T = (JD - 2451545.0)/36525.0;
+    let gmst = 280.46061837 + 360.98564736629*(JD - 2451545.0)
+             + 0.000387933*T*T - (T*T*T)/38710000.0;
+    gmst %= 360;
+    if (gmst < 0) gmst += 360;
+    return gmst;
+  }
+
+  // LST (deg) at observer longitude (west negative)
+  function lstDeg(dateUTC, lonDeg) {
+    return wrap(gmstDeg(dateUTC) + lonDeg);
+  }
+
+  // Build camera basis BEFORE roll: yaw about Y, then pitch about X
+  function cameraBasis(yawDeg, pitchDeg) {
+    const y = rad(yawDeg), p = rad(pitchDeg);
+    const cy = Math.cos(y), sy = Math.sin(y);
+    const cp = Math.cos(p), sp = Math.sin(p);
+    const forward = norm([ cy*cp, sp, -sy*cp ]); // look direction (world coords)
+    const worldUp = [0, 1, 0];
+    const right = norm(cross(worldUp, forward)); // camera +X
+    const up0   = norm(cross(forward, right));   // camera +Y (pre-roll)
+    return {forward, right, up0};
+  }
+
+  // Roll for COMPASS-UP: align projected NCP to screen up
+  function rollCompassUp(yawDeg, pitchDeg) {
+    const basis = cameraBasis(yawDeg, pitchDeg);
+    const ncp = [0,0,1];
+    const u = dot(ncp, basis.up0);
+    const r = dot(ncp, basis.right);
+    return deg(Math.atan2(r, u)); // rotate around forward so up0 -> projected NCP
+  }
+
+  // Roll for ZENITH-UP: align local zenith to screen up
+  function rollZenithUp(yawDeg, pitchDeg, lstDegVal, latDeg) {
+    const basis = cameraBasis(yawDeg, pitchDeg);
+    const zen = vecFromRaDec(lstDegVal, latDeg);
+    const u = dot(zen, basis.up0);
+    const r = dot(zen, basis.right);
+    return deg(Math.atan2(r, u));
+  }
+
+  // Rotate & project a world point
+  function project(pt, yawDeg, pitchDeg, rollDeg) {
+    const {forward, right, up0} = cameraBasis(yawDeg, pitchDeg);
+    const R = rad(rollDeg);
+    const c = Math.cos(R), s = Math.sin(R);
+    const rightR = [ right[0]*c + up0[0]*s, right[1]*c + up0[1]*s, right[2]*c + up0[2]*s ];
+    const upR    = [ -right[0]*s + up0[0]*c, -right[1]*s + up0[1]*c, -right[2]*s + up0[2]*c ];
+    const xc = dot(pt, rightR);
+    const yc = dot(pt, upR);
+    const zc = dot(pt, forward);
+    if (zc <= 0) return null;  // behind camera
+    const k = radius / (fov * zc);
+    return [ cx + k * xc, cy - k * yc, zc ];
+  }
+
+  // --- Demo data: a few bright stars ---
+  const stars = [
+    {name:"Polaris",      ra_h:  2.5303, dec: +89.2641, mag: 1.98},
+    {name:"Vega",         ra_h: 18.6156, dec: +38.7837, mag: 0.03},
+    {name:"Deneb",        ra_h: 20.6905, dec: +45.2803, mag: 1.25},
+    {name:"Altair",       ra_h: 19.8464, dec:  +8.8683, mag: 0.77},
+    {name:"Betelgeuse",   ra_h:  5.9195, dec:  +7.4071, mag: 0.50},
+    {name:"Rigel",        ra_h:  5.2423, dec:  -8.2016, mag: 0.18},
+    {name:"Sirius",       ra_h:  6.7525, dec: -16.7161, mag:-1.46},
+    {name:"Aldebaran",    ra_h:  4.5987, dec: +16.5093, mag: 0.85},
+    {name:"Antares",      ra_h: 16.4901, dec: -26.4319, mag: 1.06},
+    {name:"Arcturus",     ra_h: 14.2610, dec: +19.1825, mag:-0.05}
+  ].map(d => ({...d, ra: d.ra_h*15, v: vecFromRaDec(d.ra_h*15, d.dec)}));
+
+  // Graticule
+  const raLines  = d3.range(0, 360, 15).map(ra => d3.range(-60, 61, 10).map(dec => vecFromRaDec(ra, dec)));
+  const decLines = d3.range(-60, 61, 10).map(dec => d3.range(0, 360+15, 15).map(ra => vecFromRaDec(ra, dec)));
+
+  // Axes: +X (RA=0,Dec=0), +Y (RA=90,Dec=0), +Z (NCP)
+  const axes = [
+    {name:"+X (RA 0h)", pts:[[0,0,0], vecFromRaDec(0,0)]},
+    {name:"+Y (RA 6h)", pts:[[0,0,0], vecFromRaDec(90,0)]},
+    {name:"+Z (NCP)",   pts:[[0,0,0], [0,0,1]]}
+  ];
+
+  // Precompute LST for the fixed time/location
+  const LST_DEG = lstDeg(utcDate, OBS.lonDeg);
+
+  // --- Draw containers ---
+  const g = svg.append("g");
+  const gGrid = g.append("g");
+  const gAxes = g.append("g");
+  const gStars = g.append("g");
+  const gLabels = g.append("g");
+
+  function render() {
+    const yaw = wrap(viewYawDeg);
+    const pitch = clamp(viewPitchDeg, -89.9, 89.9);
+    const roll = (upMode === 'zenith')
+      ? rollZenithUp(yaw, pitch, LST_DEG, OBS.latDeg)
+      : rollCompassUp(yaw, pitch);
+
+    // paths
+    const lineP = d3.line()
+      .x(d => project(d, yaw, pitch, roll)?.[0])
+      .y(d => project(d, yaw, pitch, roll)?.[1])
+      .defined(p => p != null);
+
+    // grid
+    gGrid.selectAll(".ra").data(raLines).join("path")
+      .attr("class","graticule ra")
+      .attr("d", lineP);
+    gGrid.selectAll(".dec").data(decLines).join("path")
+      .attr("class","graticule dec")
+      .attr("d", lineP);
+
+    // axes
+    gAxes.selectAll("path").data(axes).join("path")
+      .attr("class","axis")
+      .attr("d", d => lineP(d.pts));
+
+    // stars
+    const pts = stars.map(s => ({ s, p: project(s.v, yaw, pitch, roll) })).filter(o => o.p);
+    const rScale = d3.scaleLinear().domain([ -1.5, 1.5 ]).range([ 5, 1.5 ]);
+    const S = gStars.selectAll("circle").data(pts, d => d.s.name);
+    S.join(
+      enter => enter.append("circle").attr("class","star")
+        .attr("r", d => rScale(d.s.mag))
+        .attr("cx", d => d.p[0]).attr("cy", d => d.p[1]),
+      update => update
+        .attr("r", d => rScale(d.s.mag))
+        .attr("cx", d => d.p[0]).attr("cy", d => d.p[1])
+    );
+    const L = gLabels.selectAll("text").data(pts, d => d.s.name);
+    L.join(
+      enter => enter.append("text").attr("class","label")
+        .attr("x", d => d.p[0] + 6).attr("y", d => d.p[1] - 6)
+        .text(d => d.s.name),
+      update => update
+        .attr("x", d => d.p[0] + 6).attr("y", d => d.p[1] - 6)
+    );
+
+    // Info panel
+    const info = document.getElementById('info');
+    info.textContent =
+      `KC lat ${OBS.latDeg.toFixed(4)}°, lon ${OBS.lonDeg.toFixed(4)}° | `
+      + `UTC ${utcDate.toISOString().replace('T',' ').replace('.000Z','Z')} | `
+      + `LST ${((LST_DEG/15+24)%24).toFixed(2)} h (${wrap(LST_DEG).toFixed(2)}°) | `
+      + `Yaw ${wrap(yaw).toFixed(1)}°, Pitch ${pitch.toFixed(1)}°, Roll ${roll.toFixed(1)}°`;
+  }
+
+  // Drag to change yaw/pitch
+  svg.call(
+    d3.drag()
+      .on("start", () => { d3.select(svg.node()).style("cursor","grabbing"); })
+      .on("drag", (event) => {
+        viewYawDeg   = wrap(viewYawDeg   + event.dx * degPerPixel);
+        viewPitchDeg = clamp(viewPitchDeg - event.dy * degPerPixel, -89.9, 89.9);
+        render();
+      })
+      .on("end", () => { d3.select(svg.node()).style("cursor","default"); })
+  );
+
+  // UI bindings
+  document.getElementById('upMode').addEventListener('change', e => {
+    upMode = e.target.value === 'compass' ? 'compass' : 'zenith';
+    render();
+  });
+  document.getElementById('sens').addEventListener('input', e => {
+    degPerPixel = +e.target.value;
+  });
+
+  render();
+})();
+</script>

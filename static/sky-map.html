@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Sky Map</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://d3js.org/d3-geo-projection.v4.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            font-family: Arial, sans-serif;
+        }
+        
+        #controls {
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #2a2a2a;
+            border-radius: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        button {
+            padding: 8px 16px;
+            background-color: #4a4a4a;
+            color: white;
+            border: 1px solid #666;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        button:hover {
+            background-color: #5a5a5a;
+        }
+        
+        button:active {
+            background-color: #3a3a3a;
+        }
+        
+        #status {
+            margin-bottom: 15px;
+            padding: 10px;
+            background-color: #2a2a2a;
+            border-radius: 8px;
+            font-size: 14px;
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .status-item {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .status-label {
+            color: #888;
+        }
+        
+        #canvas-container {
+            display: flex;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        
+        canvas {
+            border: 2px solid #ffffff;
+            cursor: crosshair;
+            background-color: black;
+        }
+        
+        #info-panel {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #2a2a2a;
+            border-radius: 8px;
+            display: none;
+        }
+        
+        #info-panel.visible {
+            display: block;
+        }
+        
+        .info-section {
+            margin-bottom: 10px;
+        }
+        
+        .info-title {
+            font-weight: bold;
+            color: #4a9eff;
+            margin-bottom: 5px;
+        }
+        
+        .info-content {
+            margin-left: 15px;
+            color: #ccc;
+        }
+        
+        #loading {
+            text-align: center;
+            padding: 50px;
+            font-size: 18px;
+            color: #888;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 5px;
+            padding: 5px;
+            background-color: #333;
+            border-radius: 6px;
+        }
+        
+        .button-group-label {
+            margin-right: 10px;
+            align-self: center;
+            font-size: 14px;
+            color: #aaa;
+        }
+    </style>
+</head>
+<body>
+    <h1>Interactive Sky Map</h1>
+    
+    <div id="loading">Loading sky data...</div>
+    
+    <div id="status" style="display: none;">
+        <div class="status-item">
+            <span class="status-label">Pitch:</span>
+            <span id="pitch-value">0.0°</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">RA at Meridian:</span>
+            <span id="ra-value">00h 00m 00s</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">View Time:</span>
+            <span id="time-value">--:--:--</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Scale:</span>
+            <span id="scale-value">200</span>
+        </div>
+    </div>
+    
+    <div id="controls" style="display: none;">
+        <button onclick="skyMap.gotoHereAndNow()">Here and Now</button>
+        
+        <div class="button-group">
+            <span class="button-group-label">Pitch:</span>
+            <button onclick="skyMap.adjustPitch(10)">Look South</button>
+            <button onclick="skyMap.adjustPitch(-10)">Look North</button>
+        </div>
+        
+        <div class="button-group">
+            <span class="button-group-label">RA:</span>
+            <button onclick="skyMap.adjustYaw(-15)">Incr RA</button>
+            <button onclick="skyMap.adjustYaw(15)">Decr RA</button>
+        </div>
+        
+        <div class="button-group">
+            <span class="button-group-label">Zoom:</span>
+            <button onclick="skyMap.adjustZoom(50)">In</button>
+            <button onclick="skyMap.adjustZoom(-50)">Out</button>
+        </div>
+        
+        <button onclick="skyMap.saveAsImage()">Save Image</button>
+        
+        <button onclick="toggleTimer()">
+            <span id="timer-button-text">Pause</span>
+        </button>
+    </div>
+    
+    <div id="canvas-container">
+        <canvas id="skyCanvas"></canvas>
+    </div>
+    
+    <div id="info-panel">
+        <div class="info-section" id="dso-info" style="display: none;">
+            <div class="info-title">Deep Space Object</div>
+            <div class="info-content" id="dso-content"></div>
+        </div>
+        
+        <div class="info-section" id="star-info" style="display: none;">
+            <div class="info-title">Star</div>
+            <div class="info-content" id="star-content"></div>
+        </div>
+        
+        <div class="info-section" id="constellation-info" style="display: none;">
+            <div class="info-title">Constellation</div>
+            <div class="info-content" id="constellation-content"></div>
+        </div>
+        
+        <button onclick="closeInfoPanel()" style="margin-top: 10px;">Close</button>
+    </div>
+    
+    <!-- Load astronomy utility functions first -->
+    <script src="/static/astronomy-utils.js" type="module"></script>
+    
+    <!-- Load the SkyMapViewer class -->
+    <script src="/static/sky-map-viewer.js" type="module"></script>
+    
+    <script type="module">
+        import { SkyMapViewer } from '/static/sky-map-viewer.js';
+        // Import any functions you need from astronomy-utils
+        // import { degree2HMS } from '/static/astronomy-utils.js';
+        
+        let skyMap;
+        let statusUpdateInterval;
+        
+        // Make functions global so buttons can call them
+        window.toggleTimer = toggleTimer;
+        window.handleSkyObjectClick = handleSkyObjectClick;
+        window.closeInfoPanel = closeInfoPanel;
+        window.skyMap = null;
+        
+        // Initialize when page loads
+        window.addEventListener('load', async () => {
+            try {
+                // Create sky map instance
+                skyMap = new SkyMapViewer('skyCanvas', {
+                    width: 1400,
+                    height: 900
+                });
+                window.skyMap = skyMap; // Make globally accessible
+                
+                // Listen for click events
+                document.getElementById('skyCanvas').addEventListener('skyObjectClicked', (event) => {
+                    handleSkyObjectClick(event.detail);
+                });
+                
+                // Load data from FastHTML API
+                await skyMap.loadData('/api/sky-map-data');
+                
+                // Hide loading message
+                document.getElementById('loading').style.display = 'none';
+                
+                // Show controls and status
+                document.getElementById('controls').style.display = 'flex';
+                document.getElementById('status').style.display = 'flex';
+                
+                // Start status updates
+                startStatusUpdates();
+                
+            } catch (error) {
+                console.error('Failed to initialize sky map:', error);
+                document.getElementById('loading').textContent = 'Error loading sky map: ' + error.message;
+            }
+        });
+        
+        // Update status display
+        function updateStatus() {
+            if (!skyMap) return;
+            
+            const status = skyMap.getStatus();
+            
+            document.getElementById('pitch-value').textContent = status.pitch.toFixed(1) + '°';
+            
+            // Format RA (need degree2HMS function)
+            if (typeof degree2HMS === 'function') {
+                document.getElementById('ra-value').textContent = degree2HMS(status.meridianRA * 15.0);
+            } else {
+                document.getElementById('ra-value').textContent = status.meridianRA.toFixed(2) + 'h';
+            }
+            
+            document.getElementById('time-value').textContent = status.virtualTime.toLocaleTimeString();
+            document.getElementById('scale-value').textContent = Math.round(status.scale);
+        }
+        
+        function startStatusUpdates() {
+            statusUpdateInterval = setInterval(updateStatus, 500);
+        }
+        
+        // Toggle animation timer
+        function toggleTimer() {
+            if (skyMap.timerRunning) {
+                skyMap.stopTimer();
+                document.getElementById('timer-button-text').textContent = 'Resume';
+            } else {
+                skyMap.startTimer();
+                document.getElementById('timer-button-text').textContent = 'Pause';
+            }
+        }
+        
+        // Handle object clicks
+        function handleSkyObjectClick(detail) {
+            const infoPanel = document.getElementById('info-panel');
+            const dsoInfo = document.getElementById('dso-info');
+            const starInfo = document.getElementById('star-info');
+            const constInfo = document.getElementById('constellation-info');
+            
+            // Hide all sections first
+            dsoInfo.style.display = 'none';
+            starInfo.style.display = 'none';
+            constInfo.style.display = 'none';
+            
+            let hasInfo = false;
+            
+            // Show DSO info
+            if (detail.dso) {
+                hasInfo = true;
+                dsoInfo.style.display = 'block';
+                const props = detail.dso.properties;
+                document.getElementById('dso-content').innerHTML = `
+                    <strong>${detail.dso.id || 'Unknown'}</strong><br>
+                    ${props.name ? 'Name: ' + props.name + '<br>' : ''}
+                    ${props.type ? 'Type: ' + props.type + '<br>' : ''}
+                    ${props.mag ? 'Magnitude: ' + props.mag + '<br>' : ''}
+                    ${props.dim ? 'Size: ' + props.dim + ' arcmin<br>' : ''}
+                `;
+            }
+            
+            // Show star info
+            if (detail.starName) {
+                hasInfo = true;
+                starInfo.style.display = 'block';
+                document.getElementById('star-content').innerHTML = `
+                    <strong>${detail.starName.name || 'Unknown'}</strong><br>
+                    ${detail.starName.bayer ? 'Bayer: ' + detail.starName.bayer + '<br>' : ''}
+                    ${detail.starName.hd ? 'HD: ' + detail.starName.hd + '<br>' : ''}
+                `;
+            }
+            
+            // Show constellation info
+            if (detail.constellation) {
+                hasInfo = true;
+                constInfo.style.display = 'block';
+                document.getElementById('constellation-content').textContent = detail.constellation;
+            }
+            
+            // Show/hide panel
+            if (hasInfo) {
+                infoPanel.classList.add('visible');
+            } else {
+                infoPanel.classList.remove('visible');
+            }
+        }
+        
+        function closeInfoPanel() {
+            document.getElementById('info-panel').classList.remove('visible');
+        }
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (statusUpdateInterval) {
+                clearInterval(statusUpdateInterval);
+            }
+            if (skyMap) {
+                skyMap.destroy();
+            }
+        });
+    </script>
+</body>
+</html>
