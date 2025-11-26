@@ -885,7 +885,7 @@ def detail(req, dso_id: str, localization: dict = {}) -> FT:
                     }});
                 }})();
             """),   
-            id="chart-wrapper"
+            id="chart-wrapperXXX", cls="chart-container"
         )
     )
 
@@ -896,7 +896,7 @@ def detail(req, dso_id: str, localization: dict = {}) -> FT:
             # JS code intercepts the afterRequest event to load and render the chart
             # use data-* attributes to pass parameters to the JS code
             # the /nonexistent hx-get is just a dummy to trigger the event (works either way)
-            Div("Loading dso-moon chart...", cls="loading", id="dso-moon-container",
+            Div("Loading dso-moon chart...", id="dso-moon-container",
                 hx_trigger="intersect once",  # Triggers when element becomes visible
                 hx_get="/nonexistent",  # Any URL, we don't care about the response
                 hx_swap="afterbegin",  # This should trigger afterRequest event
@@ -906,12 +906,14 @@ def detail(req, dso_id: str, localization: dict = {}) -> FT:
                 data_date=date, 
                 data_tz=tz
             ),
-            id="moon-wrapper"
+            id="moon-wrapper", cls="chart-container"
         )
     )
 
     return Titled(
         f"Details for ID {row['name']} (id:{dso_id})",
+        # add css
+        Link(rel="stylesheet", href="/static/app.css?v=3"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/suncalc/1.9.0/suncalc.min.js"),
         Script(src="/static/scripts.js?v=5", type="module", defer=True),

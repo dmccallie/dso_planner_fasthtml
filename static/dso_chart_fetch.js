@@ -274,8 +274,12 @@ function renderChart(containerId, config) {
     function updateNowMarker() {
         const timeNow = new Date();
         const scaledTimeNow = xScaleDate(timeNow);
+        console.log("Updating NOW marker at", timeNow, "scaled x =", scaledTimeNow);
 
         if (nowMarker) nowMarker.remove();
+
+        // Only draw if within chart bounds (i.e. relevant to today only)
+        if (scaledTimeNow < 0 || scaledTimeNow > innerWidth) return;
 
         nowMarker = g.append('g')
             .attr('class', 'now-marker')

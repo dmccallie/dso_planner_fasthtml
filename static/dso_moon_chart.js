@@ -12,8 +12,8 @@ export async function initDSOMoonChartFromAPI(containerId, dsoId, params = {}) {
     container.html('<div class="loading">Loading DSO Moon chart data...</div>');
 
     const chart = new DSOYearlyGraph(containerId, {
-        width: 1200,
-        height: 800,
+        width: 1400,
+        height: 600,
         safeAlt: 20
     });
 
@@ -60,7 +60,7 @@ class DSOYearlyGraph {
         
         // Configuration
         this.config = {
-            width: options.width || 900,
+            width: options.width || 1400,
             height: options.height || 600,
             margin: { top: 35, bottom: 50, left: 50, right: 55 },
             safeAlt: options.safeAlt || 20,
@@ -95,6 +95,7 @@ class DSOYearlyGraph {
             .attr("class", "dso-chart")
             .attr("width", this.config.width)
             .attr("height", this.config.height)
+            .style('max-width', '100%')
             .attr("viewBox", `0 0 ${this.config.width} ${this.config.height}`)
             .style("background-color", this.config.backColor);
         
