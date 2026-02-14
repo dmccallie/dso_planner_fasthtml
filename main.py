@@ -16,7 +16,10 @@ import json
 from faker import Faker
 from fasthtml.common import *
 
+import asyncio
+
 from starlette.staticfiles import StaticFiles
+from starlette.responses import Response
 
 
 from color_utils import ColorScale, best_text_color, MapPlotLibColorScale
@@ -76,65 +79,119 @@ def _parse_bool(val: str|None, *, default=False) -> bool:
         return default
     return val in {"1", "true", "True", "on", "yes"}
 
-def get_loc(req):
-    qp = req.query_params
-    # localization data from form hidden inputs
-    loc = dict(
-        lat = qp.get("lat"),
-        lon = qp.get("lon"),
-        date = qp.get("date"),            # ISO string
-        hours_start = qp.get("hstart"),
-        hours_end   = qp.get("hend"),
-        fl_mm = qp.get("fl_mm"),
-        px_um = qp.get("px_um"),
-        rows  = qp.get("rows"),
-        cols  = qp.get("cols"),
-    )
-    # if lat or long or date missing, try cookie
-    if not loc['lat'] or not loc['lon'] or not loc['date']:
-        loc.update(read_loc_cookie(req))  # tiny parser
+LOC_PARAM_MAP = {
+    "site_name": "site_name",
+    "lat": "lat",
+    "lon": "lon",
+    "date": "date",
+    "hstart": "hours_start",
+    "hend": "hours_end",
+    "fl_mm": "fl_mm",
+    "px_um": "px_um",
+    "rows": "rows",
+    "cols": "cols",
+    "ai_text": "ai_text",
+}
 
+def _merge_loc(base: dict, mapping) -> dict:
+    loc = dict(base)
+    for param, key in LOC_PARAM_MAP.items():
+        if param in mapping:
+            loc[key] = mapping.get(param)
+    return loc
+
+def normalize_loc(loc: dict) -> dict:
     # make sure lat and long are floats
     try:
-        loc['lat'] = float(loc['lat'])
+        loc['lat'] = float(loc.get('lat'))
     except (TypeError, ValueError):
         loc['lat'] = 38.76918  # powell
     try:
-        loc['lon'] = float(loc['lon'])
+        loc['lon'] = float(loc.get('lon'))
     except (TypeError, ValueError):
         loc['lon'] = -94.65635  # powell
+
     # date is ISO format YYYY-MM-DD
     try:
-        date.fromisoformat(loc['date'])
+        date.fromisoformat(loc.get('date'))
     except (TypeError, ValueError):
         loc['date'] = date.today().isoformat()
-    
+
     # also fl_mm, rows, cols as int
     try:
-        loc['fl_mm'] = int(loc['fl_mm'])
+        loc['fl_mm'] = int(loc.get('fl_mm'))
     except (TypeError, ValueError):
         loc['fl_mm'] = 0
 
     try:
-        loc['px_um'] = float(loc['px_um'])
+        loc['px_um'] = float(loc.get('px_um'))
     except (TypeError, ValueError):
         loc['px_um'] = 0.0  # default pixel size
 
     try:
-        loc['rows'] = int(loc['rows'])
+        loc['rows'] = int(loc.get('rows'))
     except (TypeError, ValueError):
         loc['rows'] = 0
 
     try:
-        loc['cols'] = int(loc['cols'])
+        loc['cols'] = int(loc.get('cols'))
     except (TypeError, ValueError):
         loc['cols'] = 0
 
     return loc
 
+def _loc_cookie_payload(loc: dict) -> dict:
+    return dict(
+        site_name=loc.get("site_name"),
+        lat=loc.get("lat"),
+        lon=loc.get("lon"),
+        date=loc.get("date"),
+        hstart=loc.get("hours_start"),
+        hend=loc.get("hours_end"),
+        fl_mm=loc.get("fl_mm"),
+        px_um=loc.get("px_um"),
+        rows=loc.get("rows"),
+        cols=loc.get("cols"),
+        ai_text=loc.get("ai_text")
+    )
+
+def _set_loc_cookie(response: Response, loc: dict) -> None:
+    response.set_cookie(
+        "astro_loc",
+        urllib.parse.quote(json.dumps(_loc_cookie_payload(loc))),
+        max_age=31536000,
+        path="/",
+        samesite="lax"
+    )
+
+def get_loc(req, response: Response | None = None) -> dict:
+    qp = req.query_params
+    print(f"get_loc query params: {qp}")
+    loc = _merge_loc(read_loc_cookie(req), qp)
+    loc = normalize_loc(loc)
+    if response is not None and any(param in qp for param in LOC_PARAM_MAP):
+        _set_loc_cookie(response, loc)
+    return loc
+
 def read_loc_cookie(req):
     # parse the cookie string
     cookie = req.cookies.get("astro_loc", "")
+    # need to deal with missing cookie (initial load) and malformed cookie (user edits, etc)
+    if not cookie:
+        print("No astro_loc cookie found; using defaults")
+        return dict(
+            lat=38.76918,
+            lon=-94.65635,
+            date=date.today().isoformat(),
+            hours_start="",
+            hours_end="",
+            fl_mm=0,
+            px_um=0.0,
+            rows=0,
+            cols=0,
+            site_name="",
+            ai_text=""
+        )
     decoded = urllib.parse.unquote(cookie)
     data = json.loads(decoded)
     print(f"Read loc cookie: {data}")
@@ -143,16 +200,19 @@ def read_loc_cookie(req):
         lat=data.get("lat", 38.76918),
         lon=data.get("lon", -94.65635),
         date=data.get("date", date.today().isoformat()),
+        hours_start=data.get("hstart", data.get("hours_start", "")),
+        hours_end=data.get("hend", data.get("hours_end", "")),
         fl_mm=data.get("fl_mm", 0),
         px_um=data.get("px_um", 0.0),
         rows=data.get("rows", 0),
-        cols=data.get("cols", 0)
+        cols=data.get("cols", 0),
+        site_name=data.get("site_name", ""),
+        ai_text=data.get("ai_text", "")
     )
 
-def get_filters(req) -> dict:
+def get_filters_from_mapping(qp) -> dict:
     # print(f"\nGet Filters Request URL: {req.url}")
     # e.g. http://localhost:5001/table?q=lisa&region=All&active=any&cat_Gamma=on&min_score=0&max_score=100
-    qp = req.query_params
     q = (qp.get("q") or "").strip()
     a_constellation = qp.get("constellation") or "all"
     constellation = [a_constellation] # convert item to list, with "all" meaning no filtering
@@ -172,6 +232,9 @@ def get_filters(req) -> dict:
                 classes=classes, object_types=object_types, sortname=sortname, order=order)
     print(f"get_filters returning {d}")
     return d
+
+def get_filters(req) -> dict:
+    return get_filters_from_mapping(req.query_params)
 
 # ----------------------- UI builders (FastTags) ------------------------------
 
@@ -197,12 +260,9 @@ def localization_bar(loc: dict, oob=False) -> FT:
         Div(
             Button("Change",
                    id="change-loc",
-                   onclick="openLocDialog()"
-                   # used htmx but now using static <dialog> in <body>
-                   # hx_get=localization,      # see route below
-                   # hx_target="body",        # add dialog to body
-                   # hx_swap="beforeend",   # don't do "afterend" cause it will be outside body!
-                   # hx_push_url="false"
+                   hx_get=loc_dialog,
+                   hx_target="#loc-dialog-body",
+                   hx_swap="innerHTML"
                 )
         )
     )
@@ -277,17 +337,6 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
             )
         ),
 
-        # Hidden localization inputs:
-        Input(type="hidden", name="lat",     value=loc.get("lat") or ""),
-        Input(type="hidden", name="lon",     value=loc.get("lon") or ""),
-        Input(type="hidden", name="date",    value=loc.get("date") or ""),
-        Input(type="hidden", name="hstart",  value=loc.get("hstart") or ""),
-        Input(type="hidden", name="hend",    value=loc.get("hend") or ""),
-        Input(type="hidden", name="fl_mm",   value=loc.get("fl_mm") or ""),
-        Input(type="hidden", name="px_um",   value=loc.get("px_um") or ""),
-        Input(type="hidden", name="rows",    value=loc.get("rows") or ""),
-        Input(type="hidden", name="cols",    value=loc.get("cols") or ""),
-
         # add fields to save sort (now "sortname") and order (get persisted into localStorage by JS)
         Input(type="hidden", name="sortname", value=filters.get("sortname") or "ra_dd"),
         Input(type="hidden", name="order",    value=filters.get("order") or "asc"),
@@ -301,6 +350,32 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
             Button("Apply", id="apply-filters", type="submit", hx_scroll="this"),
             Button("Reset", cls="secondary", type="button", onclick="window.location.href='/'"),
             cls="actions",
+        )
+    )
+
+def loc_form(loc: dict) -> FT:
+    return Form(
+        id="loc-form",
+        method="post",
+        hx_post=save_loc,
+        hx_target="#table",
+        hx_swap="outerHTML",
+        hx_include="#filters-form"
+    )(
+        Div(cls="grid2")(
+            Label("Site name",   Input(name="site_name", value=loc.get("site_name") or "")),
+            Label("Date",        Input(type="date", name="date", value=loc.get("date") or "")),
+            Label("Latitude",    Input(name="lat", value=loc.get("lat") or "")),
+            Label("Longitude",   Input(name="lon", value=loc.get("lon") or "")),
+            Label("Start hour",  Input(name="hstart", value=loc.get("hours_start") or "")),
+            Label("End hour",    Input(name="hend", value=loc.get("hours_end") or "")),
+            Label("Focal length (mm)", Input(name="fl_mm", value=loc.get("fl_mm") or "")),
+            Label("Pixel size (µm)",   Input(name="px_um", value=loc.get("px_um") or "")),
+            Label("Sensor rows", Input(name="rows", value=loc.get("rows") or "")),
+            Label("Sensor cols", Input(name="cols", value=loc.get("cols") or "")),
+
+            # note that textarea display value is inner text, not as a "value" attribute
+            Label("AI Text", Textarea(loc.get("ai_text") or "", name="ai_text", rows=4))
         )
     )
 
@@ -619,11 +694,54 @@ def apply_sentinel(trs: list[FT], *, next_page:int, has_more:bool, sortname:str,
             )
         )
 
+# test an async function
+async def async_func(x):
+    print(f"Async function called with {x}")
+    await asyncio.sleep(.001)
+    return x * 2
+
+def _serialize_fragments(content: Any) -> str:
+    if isinstance(content, (tuple, list)):
+        return "".join(to_xml(item) for item in content)
+    return to_xml(content)
+
 # ------------------------------- Routes --------------------------------------
 
+@rt('/loc/dialog')
+def loc_dialog(req) -> FT:
+    loc = get_loc(req)
+    return loc_form(loc)
+
+@rt('/loc/save')
+async def save_loc(req):
+    form = await req.form()
+    form_data = dict(form) if form else dict(req.query_params)
+
+    print(f"save_loc got form data: {form_data}")
+
+    loc = normalize_loc(_merge_loc(read_loc_cookie(req), form_data))
+
+    print(f"Normalized loc: {loc}")
+
+    filters = get_filters_from_mapping(form_data)
+    table_content = table(
+        req,
+        sortname=filters.get("sortname") or "dso_id",
+        order=filters.get("order") or "asc",
+        update_localization=True,
+        filters_override=filters,
+        localization_override=loc
+    )
+
+    response = Response(_serialize_fragments(table_content), media_type="text/html")
+    _set_loc_cookie(response, loc)
+    return response
+
 @rt
-def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
+async def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
     # note index handles http initial load as well as htmx table update
+
+    # await async_func(42)  # just testing that async works in FastHTML routes
 
     # get localization from hidden fields in query request
     loc = get_loc(req)  # TODO: cookie fallback
@@ -649,9 +767,13 @@ def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
     print(f"Got FULL /index HTTP request with sort:{sortname} and returning full page")
 
     return Titled(
-        "FastHTML + HTMX Demo",
+        "FastHTML + HTMX Demo - AI version",
         Link(rel="stylesheet", href="/static/app.css?v=1"),
         content,
+        Div(id="table-spinner", cls="table-spinner")(
+            Div(cls="spinner"),
+            Div("Updating table...", cls="spinner-text")
+        ),
 
         # Static dialog included once; it stays in DOM between opens
         # use starlette StaticFiles mount at /static/ for scripts, css, images, etc
@@ -659,24 +781,9 @@ def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
         Dialog(id="loc-dialog", cls="modal")(
             Div(cls="layout")(
                 H2("Change localization"),
-                Div(cls="body")(
-                    Form(id="loc-form")(
-                        Div(cls="grid2")(
-                            Label("Site name",   Input(name="site_name")),
-                            Label("Date",        Input(type="date", name="date")),
-                            Label("Latitude",    Input(name="lat")),
-                            Label("Longitude",   Input(name="lon")),
-                            Label("Start hour",  Input(name="hstart")),
-                            Label("End hour",    Input(name="hend")),
-                            Label("Focal length (mm)", Input(name="fl_mm")),
-                            Label("Pixel size (µm)",   Input(name="px_um")),
-                            Label("Sensor rows", Input(name="rows")),
-                            Label("Sensor cols", Input(name="cols")),
-                        )
-                    )
-                ),
+                Div("Loading...", cls="body", id="loc-dialog-body"),
                 Div(cls="footer")(
-                    Button("Save", type="button", id="save-loc"),
+                    Button("Save", type="submit", form="loc-form", id="save-loc"),
                     Form(method="dialog")(Button("Cancel"))
                 )
             )
@@ -690,7 +797,8 @@ def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
 
 
 @rt
-def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization: bool = True):
+def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization: bool = True,
+          filters_override: dict | None = None, localization_override: dict | None = None):
     """Render the FULL table with the first page and a row-sentinel at the end."""
     # sort is the name of the column to sort on
 
@@ -701,8 +809,8 @@ def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization
 
     # localization is whether to include the localization bar (oob) or not
 
-    filters     = get_filters(req)
-    localization = get_loc(req)  # TODO: cookie fallback
+    filters = filters_override or get_filters(req)
+    localization = localization_override or get_loc(req)
     
     print(f"---->>>>loading raw data for /table with sortname:{sortname}, order:{order}")
     raw_data = load_filter_localize_data(db_path, filters, localization, sortname, order)
@@ -780,7 +888,7 @@ def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc", raw_d
         sorted_rows = raw_data
     else:
         filters     = get_filters(req)
-        localization = get_loc(req)  # TODO: cookie fallback
+        localization = get_loc(req) 
         print(f"loading raw data for HTMX ROWS page {page} Request: {req.query_params} ")
         sorted_rows = load_filter_localize_data(db_path, filters, localization, sortname, order)
 
