@@ -12,3 +12,8 @@ wheels/
 # secrets
 *.env
 .env.*
+.sesskey
+
+# database
+*.db
+*.sqlite3
