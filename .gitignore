@@ -17,3 +17,4 @@ wheels/
 # database
 *.db
 *.sqlite3
+dso_data.db
