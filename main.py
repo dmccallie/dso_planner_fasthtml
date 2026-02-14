@@ -6,12 +6,13 @@ FastHTML + HTMX starter: filters + sortable table + **row-based infinite scroll*
 from __future__ import annotations
 import datetime
 from datetime import datetime, timedelta, time
+import sqlite3
+import secrets
 from zoneinfo import ZoneInfo
 import random
 from datetime import date, timedelta
 from time import perf_counter
 from typing import Callable, Any
-import urllib.parse
 import json
 from faker import Faker
 from fasthtml.common import *
@@ -36,6 +37,16 @@ app, rt = fast_app()
 # add a static files mount for CSS, JS, images, etc
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# ensure that every request has a session ID cookie, and that the session state is loaded/saved around the request
+# does this have performance implications? should we only do it for certain routes? for now just do it for everything except static files
+@app.middleware("http")
+async def ensure_session_middleware(req, call_next):
+    response = await call_next(req)
+    if req.url.path.startswith("/static/"):
+        return response
+    ensure_session_id(req, response)
+    return response
+
 # # -------------------------- Fake dataset -------------------------------------
 # SEED          = 42
 # N_ROWS_TOTAL  = 1000
@@ -46,16 +57,117 @@ MAX_HOURS_VISIBLE = 6  # max for hours visible filter FIXME for whole night?
 
 db_path = Path("./dso_data.db")
 
+SESSION_COOKIE_NAME = "astro_session_id"
+SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+
+def _session_db():
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def ensure_session_table() -> None:
+    with _session_db() as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_state (
+                session_id TEXT PRIMARY KEY,
+                data_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+def load_session_state(session_id: str | None) -> dict:
+    if not session_id:
+        return {}
+    with _session_db() as conn:
+        row = conn.execute(
+            "SELECT data_json FROM session_state WHERE session_id = ?",
+            (session_id,)
+        ).fetchone()
+    if not row:
+        return {}
+    try:
+        return json.loads(row["data_json"])
+    except json.JSONDecodeError:
+        return {}
+
+def save_session_state(session_id: str | None, data: dict) -> None:
+    if not session_id:
+        return
+    payload = json.dumps(data)
+    updated_at = datetime.utcnow().isoformat()
+    with _session_db() as conn:
+        # the ON CONFLICT clause allows us to do an upsert: insert a new row if the session_id doesn't exist, or update the existing row if it does
+        conn.execute(
+            """
+            INSERT INTO session_state (session_id, data_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                data_json = excluded.data_json,
+                updated_at = excluded.updated_at
+            """,
+            (session_id, payload, updated_at)
+        )
+
+def get_session_id(req) -> str | None:
+    return req.cookies.get(SESSION_COOKIE_NAME)
+
+def ensure_session_id(req, response: Response | None = None) -> str | None:
+    session_id = get_session_id(req)
+    if session_id:
+        return session_id
+    if response is None:
+        return None
+    # secrets module is a secure way to generate random tokens for session IDs, CSRF tokens, and other secrets.
+    # It provides functions for generating random bytes, hex strings, and URL-safe strings, as well as a secure random number generator.
+    # here it generates a random session ID using token_urlsafe, which creates a URL-safe base64-encoded string of random bytes.
+    #  The length of the random bytes can be specified (24 in this case), which results in a longer string that is more secure against collisions.
+    session_id = secrets.token_urlsafe(24)
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        session_id,
+        max_age=SESSION_TTL_SECONDS,
+        path="/",
+        samesite="lax"
+    )
+    save_session_state(session_id, {})
+    return session_id
+
+def default_loc() -> dict:
+    return dict(
+        lat=38.76918,
+        lon=-94.65635,
+        date=date.today().isoformat(),
+        hours_start="",
+        hours_end="",
+        fl_mm=0,
+        px_um=0.0,
+        rows=0,
+        cols=0,
+        site_name="Powell Observatory",
+        ai_text=""
+    )
+
+def read_loc_session(req, response: Response | None = None) -> dict:
+    session_id = ensure_session_id(req, response) if response else get_session_id(req)
+    state = load_session_state(session_id) # returns a dict with all session data, including "loc" if it exists
+    loc = default_loc()
+    # dict.update merges the default loc with any values from the session, with session values taking precedence
+    loc.update(state.get("loc", {}))
+    return loc
+
+
 dso_classes = get_unique_classes(db_path=db_path)
 print(f"Unique DSO classes: {dso_classes}")
 # gets pairs of (abbr, full name)
 dso_constellation_name_pairs = [("all", "All Constellations")] + get_unique_constellations(db_path=db_path)
 print(f"Unique DSO constellation abbreviations: {dso_constellation_name_pairs}")
-
-
+ensure_session_table()
 
 def get_sensor_coverage(dso_min_axis: float, dso_maj_axis: float, 
-    sensor_width_amin: float = 21.5, sensor_height_amin: float = 14.3) -> int:
+        sensor_width_amin: float = 21.5, sensor_height_amin: float = 14.3) -> int:
     # updated to return in percent, not fraction
     # approximate how relevant the size of the object will be in the view of the telescope
     # all units are arcMINUTES
@@ -140,75 +252,18 @@ def normalize_loc(loc: dict) -> dict:
 
     return loc
 
-def _loc_cookie_payload(loc: dict) -> dict:
-    return dict(
-        site_name=loc.get("site_name"),
-        lat=loc.get("lat"),
-        lon=loc.get("lon"),
-        date=loc.get("date"),
-        hstart=loc.get("hours_start"),
-        hend=loc.get("hours_end"),
-        fl_mm=loc.get("fl_mm"),
-        px_um=loc.get("px_um"),
-        rows=loc.get("rows"),
-        cols=loc.get("cols"),
-        ai_text=loc.get("ai_text")
-    )
-
-def _set_loc_cookie(response: Response, loc: dict) -> None:
-    response.set_cookie(
-        "astro_loc",
-        urllib.parse.quote(json.dumps(_loc_cookie_payload(loc))),
-        max_age=31536000,
-        path="/",
-        samesite="lax"
-    )
-
 def get_loc(req, response: Response | None = None) -> dict:
     qp = req.query_params
     print(f"get_loc query params: {qp}")
-    loc = _merge_loc(read_loc_cookie(req), qp)
+    loc = _merge_loc(read_loc_session(req, response), qp)
     loc = normalize_loc(loc)
     if response is not None and any(param in qp for param in LOC_PARAM_MAP):
-        _set_loc_cookie(response, loc)
+        session_id = ensure_session_id(req, response)
+        if session_id:
+            state = load_session_state(session_id)
+            state["loc"] = loc
+            save_session_state(session_id, state)
     return loc
-
-def read_loc_cookie(req):
-    # parse the cookie string
-    cookie = req.cookies.get("astro_loc", "")
-    # need to deal with missing cookie (initial load) and malformed cookie (user edits, etc)
-    if not cookie:
-        print("No astro_loc cookie found; using defaults")
-        return dict(
-            lat=38.76918,
-            lon=-94.65635,
-            date=date.today().isoformat(),
-            hours_start="",
-            hours_end="",
-            fl_mm=0,
-            px_um=0.0,
-            rows=0,
-            cols=0,
-            site_name="",
-            ai_text=""
-        )
-    decoded = urllib.parse.unquote(cookie)
-    data = json.loads(decoded)
-    print(f"Read loc cookie: {data}")
-
-    return dict(
-        lat=data.get("lat", 38.76918),
-        lon=data.get("lon", -94.65635),
-        date=data.get("date", date.today().isoformat()),
-        hours_start=data.get("hstart", data.get("hours_start", "")),
-        hours_end=data.get("hend", data.get("hours_end", "")),
-        fl_mm=data.get("fl_mm", 0),
-        px_um=data.get("px_um", 0.0),
-        rows=data.get("rows", 0),
-        cols=data.get("cols", 0),
-        site_name=data.get("site_name", ""),
-        ai_text=data.get("ai_text", "")
-    )
 
 def get_filters_from_mapping(qp) -> dict:
     # print(f"\nGet Filters Request URL: {req.url}")
@@ -714,27 +769,36 @@ def loc_dialog(req) -> FT:
 
 @rt('/loc/save')
 async def save_loc(req):
+    # this saves the loc-form but ALSO includes the current filters from the filter form
+    # the fields are all merged into the req form 
     form = await req.form()
     form_data = dict(form) if form else dict(req.query_params)
 
-    print(f"save_loc got form data: {form_data}")
+    print(f"save_loc got form data: {form_data}") # dumps all Loc and Filter fields
 
-    loc = normalize_loc(_merge_loc(read_loc_cookie(req), form_data))
+    loc = normalize_loc(_merge_loc(read_loc_session(req), form_data))
 
     print(f"Normalized loc: {loc}")
 
     filters = get_filters_from_mapping(form_data)
+
+    # note that table can't see the new cookie values since it's all in the same request, 
+    #  so we have to pass the new loc and filtervalues directly to it as overrides
     table_content = table(
         req,
         sortname=filters.get("sortname") or "dso_id",
         order=filters.get("order") or "asc",
         update_localization=True,
-        filters_override=filters,
-        localization_override=loc
+        filters_override=filters, # newly updated filters from the form submission
+        localization_override=loc # newly updated localization from the form submission
     )
 
     response = Response(_serialize_fragments(table_content), media_type="text/html")
-    _set_loc_cookie(response, loc)
+    session_id = ensure_session_id(req, response)
+    if session_id:
+        state = load_session_state(session_id)
+        state["loc"] = loc
+        save_session_state(session_id, state)
     return response
 
 @rt
@@ -766,7 +830,7 @@ async def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
     # Otherwise return the full page
     print(f"Got FULL /index HTTP request with sort:{sortname} and returning full page")
 
-    return Titled(
+    page = Titled(
         "FastHTML + HTMX Demo - AI version",
         Link(rel="stylesheet", href="/static/app.css?v=1"),
         content,
@@ -794,6 +858,7 @@ async def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
         # or set windows.xxxx = xxxxx
         Script(src="/static/scripts.js?v=6", type="module", defer=True),
     )
+    return page
 
 
 @rt
@@ -801,13 +866,9 @@ def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization
           filters_override: dict | None = None, localization_override: dict | None = None):
     """Render the FULL table with the first page and a row-sentinel at the end."""
     # sort is the name of the column to sort on
-
-    # we need to fetch all the data to get proper column headers for dynamic ones
-    # but we only render the first page of rows here
-    # pass raw_data to rows() so it doesn't reload the data again
-    # when rows is called from htmx, it will load the data itself
-
     # localization is whether to include the localization bar (oob) or not
+    # filters_override and localization_override are used to pass updated values from the loc_form submission 
+    #   since the cookie values won't be updated until the next request
 
     filters = filters_override or get_filters(req)
     localization = localization_override or get_loc(req)

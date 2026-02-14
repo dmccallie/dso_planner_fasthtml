@@ -1,69 +1,34 @@
 // /static/scripts.js
-const KEY = "astro.prefs.v1";
-const COOKIE = "astro_loc";
-
-const read = () => { try { return JSON.parse(localStorage.getItem(KEY)||"{}"); } catch { return {}; } };
-const write = (obj) => localStorage.setItem(KEY, JSON.stringify(obj));
-
-function mirrorCookie(p) {
-  const compact = {
-    lat:p.lat, lon:p.lon, date:p.date, hstart:p.hstart, hend:p.hend,
-    fl_mm:p.fl_mm, px_um:p.px_um, rows:p.rows, cols:p.cols, site_name:p.site_name
-  };
-  document.cookie = `${COOKIE}=${encodeURIComponent(JSON.stringify(compact))}; Max-Age=31536000; Path=/; SameSite=Lax`;
-}
-
-function applyToHidden(form, p) {
-  ["lat","lon","date","hstart","hend","fl_mm","px_um","rows","cols"].forEach(n=>{
-    const el = form.querySelector(`[name="${n}"]`);
-    if (el) el.value = p?.[n] ?? "";
-  });
-}
-
-function prefillDialog() {
-  const f = document.getElementById("loc-form");
-  if (!f) return;
-  const p = read();
-  for (const el of f.elements) {
-    if (el.name && p[el.name] != null) el.value = p[el.name];
-  }
-}
-
-function openLocDialog() {
-  const d = document.getElementById("loc-dialog");
-  prefillDialog();
-  d.showModal();
-}
-window.openLocDialog = openLocDialog; // callable from onclick
-console.log("from scripts -> openLocDialog bound");
-
-// Save handler (delegated so it survives swaps)
-document.body.addEventListener("click", (e) => {
-  if (e.target?.id !== "save-loc") return;
-  const d = document.getElementById("loc-dialog");
-  const f = document.getElementById("loc-form");
-  const prefs = Object.fromEntries(new FormData(f).entries());
-  write(prefs);
-  mirrorCookie(prefs);
-
-  const filters = document.getElementById("filters-form");
-  if (filters) {
-    applyToHidden(filters, prefs);
-    filters.requestSubmit(); // HTMX will refresh #content
-  }
-  d.close(); // static dialog stays in DOM; just closes
-});
-
-// Re-apply hidden fields after HTMX swaps
-function bind() {
-  const form = document.getElementById("filters-form");
-  if (!form) return;
-  applyToHidden(form, read());
-}
-document.addEventListener("DOMContentLoaded", bind);
 if (window.htmx) {
+  const spinner = document.getElementById("table-spinner");
+  const setSpinner = (active) => {
+    if (!spinner) return;
+    spinner.classList.toggle("is-active", active);
+  };
+
+  document.body.addEventListener("htmx:beforeRequest", (e) => {
+    if (e.target?.id !== "loc-form") return;
+    setSpinner(true);
+    const dialog = document.getElementById("loc-dialog");
+    if (dialog?.open) dialog.close();
+  });
+
   document.body.addEventListener("htmx:afterSwap", (e) => {
-    if (e.target.id === "content" || e.target.id === "filters-form") bind();
+    if (e.target?.id === "loc-dialog-body") {
+      const dialog = document.getElementById("loc-dialog");
+      if (dialog && !dialog.open) dialog.showModal();
+      return;
+    }
+
+    if (e.target?.id === "table") {
+      const dialog = document.getElementById("loc-dialog");
+      if (dialog?.open) dialog.close();
+      setSpinner(false);
+    }
+  });
+
+  document.body.addEventListener("htmx:responseError", () => {
+    setSpinner(false);
   });
 }
 
