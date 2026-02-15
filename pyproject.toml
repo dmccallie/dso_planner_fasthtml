@@ -11,6 +11,7 @@ dependencies = [
     "faker>=37.6.0",
     "geopy>=2.4.1",
     "matplotlib>=3.10.6",
+    "pydantic-ai>=1.59.0",
     "python-fasthtml>=0.12.25",
     "timezonefinder>=8.0.0",
 ]

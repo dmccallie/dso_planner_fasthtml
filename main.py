@@ -23,6 +23,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.responses import Response
 
 
+from ai_data_models import AstroDependencies, SA_Plan
 from color_utils import ColorScale, best_text_color, MapPlotLibColorScale
 
 from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_dso_positions, get_data_for_dso_moon_chart, \
@@ -31,6 +32,26 @@ from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_dso_positi
 # our data access layer
 from manage_dso_data import get_unique_constellations, load_dso_by_id, load_dso_subset, get_unique_classes, \
         load_filter_localize_data
+
+from agents import single_agent_astro_plan
+
+# set up some stuff for pydantic-ai and logfire
+# fetch openai api key from env file
+import dotenv
+dotenv.load_dotenv()
+
+# logire notes:
+# Your Logfire credentials are stored in /home/david/.logfire/default.toml
+# setup using logfire-cli via uv
+# uv add logfire
+# uv run logfire auth
+# uv run logfire projects use astro-planner-project
+#  https://logfire-us.pydantic.dev/dmccallie/astro-planner-project
+import logfire
+
+logfire.configure()
+logfire.instrument_pydantic_ai()
+# logfire.instrument_httpx(capture_all=True)
 
 # ----------------------------- App setup -------------------------------------
 app, rt = fast_app()
@@ -158,16 +179,8 @@ def read_loc_session(req, response: Response | None = None) -> dict:
     loc.update(state.get("loc", {}))
     return loc
 
-
-dso_classes = get_unique_classes(db_path=db_path)
-print(f"Unique DSO classes: {dso_classes}")
-# gets pairs of (abbr, full name)
-dso_constellation_name_pairs = [("all", "All Constellations")] + get_unique_constellations(db_path=db_path)
-print(f"Unique DSO constellation abbreviations: {dso_constellation_name_pairs}")
-ensure_session_table()
-
 def get_sensor_coverage(dso_min_axis: float, dso_maj_axis: float, 
-        sensor_width_amin: float = 21.5, sensor_height_amin: float = 14.3) -> int:
+                        sensor_width_amin: float = 21.5, sensor_height_amin: float = 14.3) -> int:
     # updated to return in percent, not fraction
     # approximate how relevant the size of the object will be in the view of the telescope
     # all units are arcMINUTES
@@ -178,18 +191,19 @@ def get_sensor_coverage(dso_min_axis: float, dso_maj_axis: float,
     # need at least the major axis, and sensor size
     if (dso_maj_axis and sensor_width_amin and sensor_height_amin):
         sensor_diag = math.sqrt(sensor_height_amin**2 + sensor_width_amin**2)
-        dso_diag = math.sqrt(dso_min_axis**2 + dso_maj_axis**2)
+        dso_diag    = math.sqrt(dso_min_axis**2 + dso_maj_axis**2)
         return round(100 * (dso_diag / sensor_diag))
     else:
         return 0
 
+dso_classes = get_unique_classes(db_path=db_path)
+print(f"Unique DSO classes: {dso_classes}")
+# gets pairs of (abbr, full name)
+dso_constellation_name_pairs = [("all", "All Constellations")] + get_unique_constellations(db_path=db_path)
+print(f"Unique DSO constellation abbreviations: {dso_constellation_name_pairs}")
+ensure_session_table()
 
 # ------------------------ Helpers: filtering/sorting -------------------------
-
-def _parse_bool(val: str|None, *, default=False) -> bool:
-    if val is None:
-        return default
-    return val in {"1", "true", "True", "on", "yes"}
 
 LOC_PARAM_MAP = {
     "site_name": "site_name",
@@ -204,6 +218,11 @@ LOC_PARAM_MAP = {
     "cols": "cols",
     "ai_text": "ai_text",
 }
+
+def _parse_bool(val: str|None, *, default=False) -> bool:
+    if val is None:
+        return default
+    return val in {"1", "true", "True", "on", "yes"}
 
 def _merge_loc(base: dict, mapping) -> dict:
     loc = dict(base)
@@ -427,8 +446,9 @@ def loc_form(loc: dict) -> FT:
             Label("Focal length (mm)", Input(name="fl_mm", value=loc.get("fl_mm") or "")),
             Label("Pixel size (µm)",   Input(name="px_um", value=loc.get("px_um") or "")),
             Label("Sensor rows", Input(name="rows", value=loc.get("rows") or "")),
-            Label("Sensor cols", Input(name="cols", value=loc.get("cols") or "")),
-
+            Label("Sensor cols", Input(name="cols", value=loc.get("cols") or ""))),
+        
+        Div(cls="grid1")(
             # note that textarea display value is inner text, not as a "value" attribute
             Label("AI Text", Textarea(loc.get("ai_text") or "", name="ai_text", rows=4))
         )
@@ -749,18 +769,67 @@ def apply_sentinel(trs: list[FT], *, next_page:int, has_more:bool, sortname:str,
             )
         )
 
-# test an async function
-async def async_func(x):
-    print(f"Async function called with {x}")
-    await asyncio.sleep(.001)
-    return x * 2
-
 def _serialize_fragments(content: Any) -> str:
     if isinstance(content, (tuple, list)):
         return "".join(to_xml(item) for item in content)
     return to_xml(content)
 
 # ------------------------------- Routes --------------------------------------
+
+# fake AI placeholder for testing
+async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
+    # in a real implementation, this would call the AI agent with the current loc and filters, and get back an updated loc and a SQL query to run
+    # for now, just return the same loc and a dummy SQL query
+
+    print(f"AI Agent called with loc: {loc} and filters: {filters}")
+
+
+    updated_deps = AstroDependencies(
+        # make sure these defaults are 'now' at runtime
+        # note this should be CLIENT "now" not server!
+            default_time=datetime.now(ZoneInfo("America/Chicago")).strftime("%H:%M"),
+            default_date=datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d"),
+            default_timezone="America/Chicago",
+            default_location="Powell Observatory, Kansas", # this should be findable 
+            # default_latitude=38.7076,
+            # default_longitude=-94.7073,
+            default_telescope="Astrophysics 130EDF F6.3",
+            default_camera="ZWO ASI 2600MC Pro",
+    )
+    
+    ai_query = "plan session for nebula near orion at 10PM on march 1 with Rasa 8 at zipcode 37450"
+    ai_query = ai_query + f" make it march 3"
+    ai_query = ai_query + f" in Stilwell KS"
+
+    result = await single_agent_astro_plan.run(ai_query, deps=updated_deps)
+    if isinstance(result.output, SA_Plan) and result.output.valid_plan:
+        print(f"AI Agent returned valid plan with SQL: {result.output.sql_query}")
+        # update loc with new info from plan
+        if result.output.observer_context:
+            loc['site_name'] = result.output.observer_context.location
+            loc['lat'] = result.output.observer_context.latitude_deg
+            loc['lon'] = result.output.observer_context.longitude_deg
+            loc['date'] = result.output.observer_context.observe_date
+            loc['hours_start'] = result.output.observer_context.observe_time 
+            # loc['hours_end'] = result.output.observer_context.hours_end
+        if result.output.equipment and result.output.equipment.telescope:
+            loc['fl_mm'] = result.output.equipment.telescope.focal_length_mm
+            # loc['scope_name'] = result.output.equipment.telescope.name
+        if result.output.equipment and result.output.equipment.camera:
+            loc['px_um'] = result.output.equipment.camera.pixel_um
+            loc['rows'] = result.output.equipment.camera.sensor_h_mm #FIXME!!
+            loc['cols'] = result.output.equipment.camera.sensor_w_mm
+            # loc['camera_name'] = result.output.equipment.camera.name
+        ai_query = result.output.sql_query
+    else:
+        print(f"AI Agent returned non-plan output: {result.output}")
+        ai_query = "SELECT * FROM dso_localized WHERE 1=1"  # fallback dummy query
+    
+    updated_loc = dict(loc)
+    updated_loc["ai_text"] = ai_query
+    updated_loc['sql_query'] = f"SELECT * FROM dso WHERE 1=1"  # dummy query that should be replaced by AI-generated query based on loc and filters
+
+    return updated_loc
 
 @rt('/loc/dialog')
 def loc_dialog(req) -> FT:
@@ -769,7 +838,7 @@ def loc_dialog(req) -> FT:
 
 @rt('/loc/save')
 async def save_loc(req):
-    # this saves the loc-form but ALSO includes the current filters from the filter form
+    # this saves the localization (loc-form) but ALSO includes the current filters from the filter form
     # the fields are all merged into the req form 
     form = await req.form()
     form_data = dict(form) if form else dict(req.query_params)
@@ -782,6 +851,11 @@ async def save_loc(req):
 
     filters = get_filters_from_mapping(form_data)
 
+    # I think this is where the AI Agent will step in. 
+    # will fale it for now
+
+    updated_loc = await ai_update_loc_and_generate_sql(loc, filters)
+
     # note that table can't see the new cookie values since it's all in the same request, 
     #  so we have to pass the new loc and filtervalues directly to it as overrides
     table_content = table(
@@ -790,14 +864,14 @@ async def save_loc(req):
         order=filters.get("order") or "asc",
         update_localization=True,
         filters_override=filters, # newly updated filters from the form submission
-        localization_override=loc # newly updated localization from the form submission
+        localization_override=updated_loc # newly updated localization from the form submission
     )
 
     response = Response(_serialize_fragments(table_content), media_type="text/html")
     session_id = ensure_session_id(req, response)
     if session_id:
         state = load_session_state(session_id)
-        state["loc"] = loc
+        state["loc"] = updated_loc
         save_session_state(session_id, state)
     return response
 
