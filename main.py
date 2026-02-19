@@ -31,7 +31,7 @@ from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_dso_positi
 
 # our data access layer
 from manage_dso_data import get_unique_constellations, load_dso_by_id, load_dso_subset, get_unique_classes, \
-        load_filter_localize_data
+        load_filter_localize_data, get_localized_dso_data, load_localize_filter_expand_sort_dso_data
 
 from agents import single_agent_astro_plan
 
@@ -217,6 +217,7 @@ LOC_PARAM_MAP = {
     "rows": "rows",
     "cols": "cols",
     "ai_text": "ai_text",
+    "sql_query": "sql_query"
 }
 
 def _parse_bool(val: str|None, *, default=False) -> bool:
@@ -611,15 +612,16 @@ COL_FIGS: list[ColumnConfig]= [
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name="rise", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+    # earlier code used dos['rise'] but now we use dso['rise_time']
+    ColumnConfig(name="rise_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Rise",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
-    ColumnConfig(name="transit", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name="transit_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Trans",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
-    ColumnConfig(name="set", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name="set_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Set",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
@@ -797,11 +799,15 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
             default_camera="ZWO ASI 2600MC Pro",
     )
     
-    ai_query = "plan session for nebula near orion at 10PM on march 1 with Rasa 8 at zipcode 37450"
-    ai_query = ai_query + f" make it march 3"
-    ai_query = ai_query + f" in Stilwell KS"
+    user_query = loc['ai_text']
 
-    result = await single_agent_astro_plan.run(ai_query, deps=updated_deps)
+    if not user_query:
+        print("No User AI query provided, skipping AI Agent and returning original loc with dummy SQL")
+        return {**loc, 'sql_query': "SELECT * FROM dso_localized WHERE 1=1"}
+    
+    result = await single_agent_astro_plan.run(user_query, deps=updated_deps)
+    ai_query = "" # the query we use to filter Dso, with or without AI help
+    
     if isinstance(result.output, SA_Plan) and result.output.valid_plan:
         print(f"AI Agent returned valid plan with SQL: {result.output.sql_query}")
         # update loc with new info from plan
@@ -817,17 +823,18 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
             # loc['scope_name'] = result.output.equipment.telescope.name
         if result.output.equipment and result.output.equipment.camera:
             loc['px_um'] = result.output.equipment.camera.pixel_um
-            loc['rows'] = result.output.equipment.camera.sensor_h_mm #FIXME!!
-            loc['cols'] = result.output.equipment.camera.sensor_w_mm
+            loc['rows'] = result.output.equipment.camera.sensor_rows
+            loc['cols'] = result.output.equipment.camera.sensor_columns
             # loc['camera_name'] = result.output.equipment.camera.name
         ai_query = result.output.sql_query
     else:
         print(f"AI Agent returned non-plan output: {result.output}")
+        # FIXME return this to client via toast or popup!
         ai_query = "SELECT * FROM dso_localized WHERE 1=1"  # fallback dummy query
     
     updated_loc = dict(loc)
-    updated_loc["ai_text"] = ai_query
-    updated_loc['sql_query'] = f"SELECT * FROM dso WHERE 1=1"  # dummy query that should be replaced by AI-generated query based on loc and filters
+    # updated_loc["ai_text"] = ai_query 
+    updated_loc['sql_query'] = ai_query #FIXME naming 
 
     return updated_loc
 
@@ -843,7 +850,7 @@ async def save_loc(req):
     form = await req.form()
     form_data = dict(form) if form else dict(req.query_params)
 
-    print(f"save_loc got form data: {form_data}") # dumps all Loc and Filter fields
+    print(f"/loc/save got form data: {form_data}") # dumps all Loc and Filter fields
 
     loc = normalize_loc(_merge_loc(read_loc_session(req), form_data))
 
@@ -942,7 +949,7 @@ def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization
     # sort is the name of the column to sort on
     # localization is whether to include the localization bar (oob) or not
     # filters_override and localization_override are used to pass updated values from the loc_form submission 
-    #   since the cookie values won't be updated until the next request
+    #   since the session values might not be updated until the next request (??)
 
     filters = filters_override or get_filters(req)
     localization = localization_override or get_loc(req)
@@ -1026,6 +1033,14 @@ def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc", raw_d
         localization = get_loc(req) 
         print(f"loading raw data for HTMX ROWS page {page} Request: {req.query_params} ")
         sorted_rows = load_filter_localize_data(db_path, filters, localization, sortname, order)
+
+    # debug test for now
+    session_id = get_session_id(req)
+    filters2     = get_filters(req)
+    localization2 = get_loc(req) 
+    assert session_id is not None, "Session ID should not be None in /rows route"
+    dso_test = load_localize_filter_expand_sort_dso_data(session_id, db_path, filters2, localization2, sortname, order)
+    print(f"Test load_localize_filter_expand_sort_dso_data returned {len(dso_test)} rows for session {session_id}")
 
     print(f"After filtering, {len(sorted_rows)} rows match criteria")
     
