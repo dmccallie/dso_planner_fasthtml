@@ -53,14 +53,14 @@ class AstroDependencies:
 
 class Camera(BaseModel):
     name: str
-    sensor_w_mm: PositiveFloat
-    sensor_h_mm: PositiveFloat
+    sensor_columns: PositiveFloat = Field(..., description="The number of columns in the camera sensor")
+    sensor_rows: PositiveFloat = Field(..., description="The number of rows in the camera sensor")
     pixel_um: PositiveFloat
 
 class Telescope(BaseModel):
     name: str
-    focal_length_mm: PositiveFloat
-    f_ratio: PositiveFloat
+    focal_length_mm: PositiveFloat = Field(..., description="The focal length of the telescope in millimeters")
+    f_ratio: PositiveFloat = Field(..., description="The f-ratio of the telescope")
 
 class Equipment(BaseModel):
     telescope: Optional[Telescope] = None

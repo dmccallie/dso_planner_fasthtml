@@ -155,6 +155,10 @@ single_agent_astro_plan = Agent(
         - Your end goal is to find telescope focal length and f-ratio, and camera sensor size and pixel size.
         - If there is only information for telescope or camera, return just that part.
         - If you can only find partial information, return what you can.
+        - If the user's query references the Ruisinger telescope, or the telescope at Powell Observatory,
+             use telescope name "Ruisinger 30", with focal length 3700mm and f-ratio 4.9
+        - If the user's query references the "Babydome" use telescope name Babydome,
+             with specifications of a Celestron 11 EdgeHD with Hyperstar v1 which has focal length of 560 and f-ratio 2.1
         - Default values will be provided as Instructions at run time.
         - Do not make up values.
 
@@ -162,7 +166,10 @@ single_agent_astro_plan = Agent(
         - From the user's textual description, extract or infer the following fields into the SA_Plan's ObserverContext:
              location, latitude_deg, longitude_deg, observe_date, observe_time, and timezone.
         - Follow these rules when inferring the ObserverContext:
-        - If the user provides a location, infer the latitude and longitude if possible..
+        - If the user provides a location, infer the latitude and longitude if possible.
+  
+        - If the user's location references ASKC's Dark Sky Site, use longitude = -94.53, latitude = 38.21
+  
         - If the user provides a relative date like "tonight" or "this weekend", 
             convert that to an actual date string using the default_date provided as a runtime instruction.
             for example, if default_date is "2024-06-15" and user says "tonight", use "2024-06-15" as the date string.

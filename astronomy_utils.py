@@ -544,6 +544,8 @@ def _calculate_sensor_fov_amin(pixel_scale: float, sensor_width_px: int, sensor_
 @cache
 def calculate_sensor_fov_amin(focal_length_mm: float, pixel_size_um: float,
     sensor_width_px: int, sensor_height_px: int) -> Tuple[float, float]:
+    if focal_length_mm <= 0 or pixel_size_um <= 0 or sensor_width_px <= 0 or sensor_height_px <= 0:
+        return (0.0, 0.0)
     pixel_scale = calculate_pixel_scale(focal_length_mm, pixel_size_um)
     return _calculate_sensor_fov_amin(pixel_scale, sensor_width_px, sensor_height_px)
 
@@ -990,6 +992,8 @@ def ai_localize_dso(ra:float, dec:float, observer_lat: float, observer_lon: floa
 
 import sqlite3
 from pathlib import Path
+
+# THis is OLD code saved for reference
 def ai_localize_and_fetch_dsos(ai_query:str, db_path:Path, observer_lat: float, observer_lon: float,
                             observe_date:str, observe_time: str, timezone:str) -> list[dict[str, str]]:
     """ Create a temporary table with localized data for all DSOs
