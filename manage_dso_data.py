@@ -1,24 +1,338 @@
 # various data fetch, filter, localize, sort functions
+from curses import raw
 from functools import cache
+import hashlib
 from random import random
 import sqlite3
 from pathlib import Path
 
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from random import random
 
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from astronomy_utils import calculate_pixel_scale, calculate_rise_transit_set_fast, calculate_sensor_fov_amin, find_all_twilight_times, get_sensor_coverage, ra_dec_to_altaz_airmass_multiple_times
+from astronomy_utils import ai_localize_dso, calculate_pixel_scale, calculate_rise_transit_set_fast, calculate_sensor_fov_amin, find_all_twilight_times, get_sensor_coverage, ra_dec_to_altaz_airmass_multiple_times
 from astropy import units as u
 from astropy.coordinates import SkyCoord, EarthLocation, AltAz
 
 from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR
 
-# maybe make this a class later if we need to maintain state
-# for now, just functions
 
+def load_localize_filter_expand_sort_dso_data(session_id: str, db_path: Path, filters:dict, localization:dict, sort_key:str, order:str) -> list[dict]:
+    # ai version to load raw data, apply ai or plain localization, then filter, sort, 
+    #   and return DSO data with the extra fields needed for display and filtering
+    # uses session_id to access db or cached localization data if needed.
+
+    print("load_localize_filter_expand_sort_dso_data Localization parameters:", localization)
+    print("load_localize_filter_expand_sort_dso_data Filter parameters:", filters)
+
+    # make sure we have the required localization parameters or fail since defaults have already been applied
+    assert 'lat' in localization, "Localization must include 'lat'"
+    assert 'lon' in localization, "Localization must include 'lon'"
+    # assert 'elevation' in localization, "Localization must include 'elevation'"
+    assert 'date' in localization, "Localization must include 'date'"
+    assert 'hours_start' in localization, "Localization must include 'hours_start'"
+
+    # assert 'timezone' in localization, "Localization must include 'timezone'"
+    
+    user_timezone = "America/Chicago" # FIXME
+    elevation = localization.get('elevation', 330.0) # default elevation in meters if not provided FIXME
+
+    # localize and select subset of data based on ai_query and localization
+    # will create table containing localized data, then apply SQL to fetch subset
+    dso_list = get_localized_dso_data(session_id, db_path, localization['sql_query'], localization['lat'], localization['lon'],
+                                      localization['date'], localization['hours_start'], user_timezone)
+
+    #expand dso_data and apply dynamic filtering and sorting based on filters and sort_key
+    dso_list = expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list, localization, filters, sort_key, order)
+
+    return dso_list
+
+def get_localized_dso_data(session_id: str, db_path: Path, sql_query: str, observer_lat: float, observer_lon: float,
+                            observe_date:str, observe_time: str, timezone:str ) -> list[dict]:
+    # uses a session-keyed db table to cache localized data accros calls where localization is the same
+    # observe date and time are strings, assumed to be in local timezone
+
+    # will create a CTE that joins the raw dso data with the localized data for the current session and localization,
+    #  then apply the passed in sql_query to that CTE to fetch the localized subset of data needed for display and filtering
+    # that way we don't need a temp table (which doesn't support parameterized queries) 
+
+    # here's the CTE wrapper function (essentially CTE is a dynamic view)
+    def wrap_ai_sql_in_cte(ai_sql: str) -> str:
+        ai_sql = ai_sql.strip().rstrip(";")
+        return f"""
+            WITH dso_localized AS (
+                SELECT dso.*, ld.altitude, ld.azimuth, ld.air_mass,
+                    ld.rise_time, ld.set_time, ld.transit_time
+                FROM dso
+                LEFT JOIN dso_localization_values ld ON dso.dso_id = ld.dso_id
+                WHERE ld.session_id = ? AND ld.loc_hash = ?
+            )
+            {ai_sql}
+        """
+    
+    # hash for localization parameters to use as key in db to cache localized data for each unique localization/session
+    def create_hash(observer_lat: float, observer_lon: float, observe_date_iso:str) -> str:
+        raw = f"lat:{observer_lat}_lon:{observer_lon}_date:{observe_date_iso}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    
+    
+    assert sql_query is not None and sql_query.strip() != "", "SQL query was missing from localization"
+    assert session_id is not None and session_id.strip() != "", "Session ID is required to fetch localized DSO data"
+
+    # first time, make sure the localized dso table and indexes exist
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS dso_localization_values (
+                session_id TEXT NOT NULL,
+                loc_hash   TEXT NOT NULL,
+                dso_id TEXT NOT NULL,
+
+                altitude REAL,
+                azimuth REAL,
+                air_mass REAL,
+                rise_time TEXT, /* iso format full datetime string for utc */
+                set_time TEXT, /* iso format full datetime string for utc */
+                transit_time TEXT, /* iso format full datetime string for utc */
+
+                created_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, loc_hash, dso_id),
+            FOREIGN KEY (dso_id) REFERENCES dso(dso_id)
+            );
+            ''')
+        
+        # create index on session_id and loc_hash for faster lookups
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS dso_localization_values_session_idx
+            ON dso_localization_values(session_id, loc_hash);
+                       ''')
+        # may need to create keys on dso_id for the join 
+        print("Ensured dso_localization_values table and indexes exist in database")
+    
+    # clean up date and time
+    # ensure we have no seconds in time string (AI puts them there sometimes)
+    if len(observe_time.split(":")) == 3:
+        observe_time = ":".join(observe_time.split(":")[0:2])
+
+    # date_iso = f"{observe_date}T{observe_time}"
+    dt = datetime.strptime(f"{observe_date} {observe_time}", "%Y-%m-%d %H:%M")
+
+    # attach timezone
+    dt = dt.replace(tzinfo=ZoneInfo(timezone))
+    print(f"[ai_localize_and_fetch_dsos] recreate full datetime = {dt.isoformat()} for ({timezone})")
+
+    # FIXME add elevation
+    loc_hash = create_hash(observer_lat, observer_lon, dt.isoformat())
+
+    # wrap the ai sql inside the CTE that joins with the localized data for this session and localization
+    final_sql_query = wrap_ai_sql_in_cte(sql_query)
+
+    # see if we already have data for this session and localization
+    print(f"Final SQL Query: {final_sql_query} with params session_id={session_id}, loc_hash={loc_hash}")
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        # use the passed in query string to fetch from localized view
+        cursor.execute(final_sql_query, (session_id, loc_hash))
+        rows = cursor.fetchall()
+        if rows and len(rows) > 0:
+            print(f"FOUND {len(rows)} localized DSO records for session {session_id} and loc_hash {loc_hash}")
+            return [dict(row) for row in rows]
+        
+        # we have no data for this session and localization, so we need to create it
+        print(f"No localized DSO records found for session {session_id} and loc_hash {loc_hash}, CREATING NEW localized data")
+
+        # spin through the raw DSO data and calculate the localization values for each, then insert into the localized values table
+        conn.commit()
+
+        cursor.execute('SELECT * FROM dso')
+        raw_dsos = cursor.fetchall()
+        conn.commit()
+
+        # for each DSO, calculate the localization values 
+        # do this all in memory because there are only a few hundred dsos.
+        localization_records = [] # for a batch insert after the loop
+
+        for dso in raw_dsos:
+            dso_id = dso['dso_id']
+            ra_dd = dso['ra_dd']
+            dec_dd = dso['dec_dd']
+
+            altitude, azimuth, air_mass, visible, rise_time, transit_time, set_time = \
+                  ai_localize_dso(ra_dd, dec_dd, observer_lat, observer_lon, dt.isoformat(), timezone)
+            
+            localization_records.append((session_id, loc_hash, dso_id, altitude, azimuth, air_mass, rise_time, set_time, transit_time, datetime.now().isoformat()))
+
+        # batch insert all the localization records for this session and localization
+        cursor.executemany('''
+            INSERT INTO dso_localization_values (session_id, loc_hash, dso_id,
+                altitude, azimuth, air_mass, rise_time, set_time, transit_time, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', localization_records)
+        
+        conn.commit()
+
+        # now fetch the data using the final_sql_query with the CTE that joins with the localized data for this session and localization
+        cursor.execute(final_sql_query, (session_id, loc_hash))
+        rows = cursor.fetchall()
+        if rows and len(rows) > 0:
+            print(f"After creating localized data, found {len(rows)} localized DSO records for session {session_id} and loc_hash {loc_hash}")
+            return [dict(row) for row in rows]
+
+    return []
+
+
+def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], localization:dict, filters:dict,
+                                                           sort_key:str, order:str) -> list[dict]:
+    # input is raw list of dso dicts with localization values (altitude, azimuth, air_mass, rise_time, set_time, transit_time)
+    # output is list of dso dicts with extra fields needed for display and filtering
+
+    # try to filter first to reduce computation of expansion fields.
+
+    user_timezone = "America/Chicago" # FIXME
+    elevation = localization.get('elevation', 330.0) # default elevation in meters if not provided FIXME
+
+    # we may skip rows to save time, so build a new list of results rather than modifying in place
+    dso_results = []
+
+    for dso in dso_list:
+        
+        # filter by name match (field 'q' in filters) if provided
+        # FIXME make this more robust like a fuzzy match
+        if 'q' in filters and filters['q'].strip() != "":
+            q = filters['q'].strip().lower()
+            if q not in dso['name'].lower() and q not in dso['catalog'].lower():
+                continue
+        
+        # filter out by class if needed
+        # for 'constellation': ['all'],
+        # for 'classes': either [] for all, or list ['Neb']
+        # same for 'object_types': [] for all, or ['SNR', 'xxx'],
+        if 'classes' in filters and filters['classes'] and "all" not in filters['classes']:
+            if dso['class'] not in filters['classes']:
+                continue
+        
+        # filter out by constellation if needed
+        if 'constellation' in filters and filters['constellation'] and len(filters['constellation'])>0:
+            if dso['constellation_abbr'] not in filters['constellation']:
+                continue
+        
+        # filter out by object type if needed
+        if 'object_types' in filters and filters['object_types'] and len(filters['object_types'])>0:
+            if dso['object_type'] not in filters['object_types']:
+                continue
+        
+        # add score field for sorting and filtering (random for now)
+        dso['score'] = int(100 * random()) # random int from 0 to 100 for now
+
+        # fix up rise set transit times to be localized strings for display, and sortable strings for sorting
+        # FIXME consider move to Td display logic
+        for key in ['rise_time', 'set_time', 'transit_time']:
+            rt = dso.get(key, None)
+            if rt is not None:
+                try:
+                    rt_dt = datetime.strptime(rt, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                    rt_dt = rt_dt.astimezone(ZoneInfo(user_timezone))
+                    dso[key] = rt_dt.strftime("%H:%M")
+                    dso[f"{key}_sort"] = rt_dt.strftime("%Y-%m-%d %H:%M")
+                except Exception as e:
+                    print(f"Error parsing {key} for DSO {dso['name']} with value {rt}: {e}")
+                    dso[key] = "---"
+                    dso[f"{key}_sort"] = ""
+            else:
+                dso[key] = "---"
+                dso[f"{key}_sort"] = ""
+
+
+        # extract localization params to fill out the extra hours_viz and coverage fields needed for filtering and display
+        # FIXME make this a common routine
+        lat = localization.get('lat', 38.76918)
+        lon = localization.get('lon', -94.65635)
+        elev = localization.get('elevation', 330.0)
+        start_date_str = localization.get('date', None)
+        
+        if start_date_str is None:
+            start_date = datetime.now(tz=ZoneInfo(user_timezone))
+        else:
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+            start_date = start_date.replace(tzinfo=ZoneInfo(user_timezone))
+
+        # fake coverage for now - revisit FIXME
+        dso['coverage'] = int(200 * random()) # random int from 0 to 100 for now
+
+        # filter out records by coverage
+        if 'min_coverage' in filters and dso['coverage'] < filters['min_coverage']:
+            continue
+        if 'max_coverage' in filters and dso['coverage'] > filters['max_coverage']:
+            continue
+
+        # for now, first time will be what user queried, then add 5 more obs times at 1 hour intervals
+        # consider rounding to nearest hour? but that would mess up Agent's logic?
+        NUMBER_OBS_TIMES = 6
+        start_obs_time = datetime.combine(start_date, time(20,0,0)).replace(tzinfo=ZoneInfo(user_timezone)) 
+        obs_times = [start_obs_time + timedelta(hours=i) for i in range(0, NUMBER_OBS_TIMES)]
+        
+        results = ra_dec_to_altaz_airmass_multiple_times(
+            ra=dso['ra_dd'],
+            dec=dso['dec_dd'],
+            observer_lat=lat,
+            observer_lon=lon,
+            datetime_list=obs_times
+        )
+
+        number_hours_viz = 0 # how many times is airmass < 3.0
+        for i in range(0, NUMBER_OBS_TIMES):
+            res = results[i]
+            # add the actual time for each obs, for column header
+            # FIXME should be normalized into a dict of these observations
+            dso[f'obsTime{i}_dt'] = obs_times[i]
+            if res is None:
+                dso[f'obsTime{i}'] = "---/---<br>---"
+                dso[f'obsTime{i}_alt'] = -90.0
+            else:
+                alt, az, airmass = res['altitude'], res['azimuth'], res['airmass']
+                dso[f'obsTime{i}'] = f"{alt:.0f}\u00B0/{az:.0f}\u00B0<br>{airmass:.1f}"
+                dso[f'obsTime{i}_alt'] = alt # used to drive color scale
+                if airmass is not None and isinstance(airmass, float) and airmass <= MIN_AIRMASS:
+                    number_hours_viz += 1        
+    
+        # fake hours_viz for now - revisit FIXME
+        dso['hours_viz'] = number_hours_viz
+
+        # filter by hours_viz
+        if 'min_hours_viz' in filters and dso['hours_viz'] < filters['min_hours_viz']:
+            continue
+        if 'max_hours_viz' in filters and dso['hours_viz'] > filters['max_hours_viz']:
+            continue
+
+        dso_results.append(dso) # our output
+
+        # skip filter by score
+
+    # sort
+    VALID_SORTS = { "name", "catalog", "class", "constellation_abbr", "score", "type", "hours_viz", "vis_mag", "coverage", "rise_time", "transit_time", "set_time"}
+
+    if sort_key not in VALID_SORTS:
+        print(f"Invalid sort key {sort_key}, defaulting to 'ra_dd'")
+        sort_key = 'ra_dd' # default sort by RA
+    if sort_key == 'rise_time':
+        sort_key = 'rise_time_sort' # use sortable version of rise time
+    if sort_key == 'set_time':
+        sort_key = 'set_time_sort' # use sortable version of set time
+    if sort_key == 'transit_time':
+        sort_key = 'transit_time_sort' # use sortable version of transit time
+
+    sorted_dso_list = sorted(dso_results, key=lambda x: x[sort_key], reverse=(order=='desc'))
+
+    return sorted_dso_list
+
+
+
+
+# This is the old pre-ai code - save for reference
 def load_filter_localize_data(db_path: Path, 
     filters:dict, localization:dict,
     sort_key:str, order:str) -> list[dict]:
@@ -47,9 +361,9 @@ def load_filter_localize_data(db_path: Path,
     # order is 'asc' or 'desc'
     # returns list of dicts with all fields from dso table plus:
     #   Coverage (float, percent of sensor's field of view covered by object)
-    #   Rise (str, localized rise time, e.g. '20:30')
-    #   Transit (str, localized transit time, e.g. '23:15')
-    #   Set (str, localized set time, e.g. '02:00')
+    #   Rise_time (str, localized rise time, e.g. '20:30')
+    #   Transit_time (str, localized transit time, e.g. '23:15')
+    #   Set_time (str, localized set time, e.g. '02:00')
     #   Score (float, computed score based on visibility, mag, size, etc.)
     #   HoursViz (float, hours usefully visible)
     #   ObsTime1 (datetime, date/time for observation 1)
@@ -119,30 +433,30 @@ def load_filter_localize_data(db_path: Path,
             # for now, assume tz=ZoneInfo("America/Chicago")
             rt = rt.astimezone(tz=ZoneInfo("America/Chicago"))
             # format as 24hr time, no date
-            item['rise'] = rt.strftime("%H:%M")
-            item['rise_sort'] = rt.strftime("%Y-%m-%d %H:%M")
+            item['rise_time'] = rt.strftime("%H:%M")
+            item['rise_time_sort'] = rt.strftime("%Y-%m-%d %H:%M")
             # item['rise'] = rt.strftime("%d %b %Y <br> %I:%M %p")
         else:
-            item['rise'] = rt
-            item['rise_sort'] = ""
+            item['rise_time'] = rt
+            item['rise_time_sort'] = ""
 
         rt = rts[i]['transit_time']
         if isinstance(rt, datetime):
             rt = rt.astimezone(tz=ZoneInfo("America/Chicago"))
-            item['transit'] = rt.strftime("%H:%M")
-            item['transit_sort'] = rt.strftime("%Y-%m-%d %H:%M")
+            item['transit_time'] = rt.strftime("%H:%M")
+            item['transit_time_sort'] = rt.strftime("%Y-%m-%d %H:%M")
         else:
-            item['transit'] = rt
-            item['transit_sort'] = ""
+            item['transit_time'] = rt
+            item['transit_time_sort'] = ""
 
         rt = rts[i]['set_time']
         if isinstance(rt, datetime):
             rt = rt.astimezone(tz=ZoneInfo("America/Chicago"))
-            item['set'] = rt.strftime("%H:%M")
-            item['set_sort'] = rt.strftime("%Y-%m-%d %H:%M")
+            item['set_time'] = rt.strftime("%H:%M")
+            item['set_time_sort'] = rt.strftime("%Y-%m-%d %H:%M")
         else:
-            item['set'] = rt
-            item['set_sort'] = ""
+            item['set_time'] = rt
+            item['set_time_sort'] = ""
 
     # find astro twilight time for the date - our first obs time
     # this is @cache so only computed once per date / location
