@@ -31,7 +31,7 @@ from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_dso_positi
 
 # our data access layer
 from manage_dso_data import get_unique_constellations, load_dso_by_id, load_dso_subset, get_unique_classes, \
-        load_filter_localize_data, get_localized_dso_data, load_localize_filter_expand_sort_dso_data
+        get_localized_dso_data, load_localize_filter_expand_sort_dso_data
 
 from agents import single_agent_astro_plan
 
@@ -139,21 +139,24 @@ def ensure_session_id(req, response: Response | None = None) -> str | None:
     session_id = get_session_id(req)
     if session_id:
         return session_id
-    if response is None:
-        return None
-    # secrets module is a secure way to generate random tokens for session IDs, CSRF tokens, and other secrets.
-    # It provides functions for generating random bytes, hex strings, and URL-safe strings, as well as a secure random number generator.
-    # here it generates a random session ID using token_urlsafe, which creates a URL-safe base64-encoded string of random bytes.
-    #  The length of the random bytes can be specified (24 in this case), which results in a longer string that is more secure against collisions.
-    session_id = secrets.token_urlsafe(24)
-    response.set_cookie(
-        SESSION_COOKIE_NAME,
-        session_id,
-        max_age=SESSION_TTL_SECONDS,
-        path="/",
-        samesite="lax"
-    )
-    save_session_state(session_id, {})
+
+    # If a session was already created earlier in this request, reuse it.
+    existing = getattr(req.state, "session_id", None)
+    if existing:
+        session_id = existing
+    else:
+        session_id = secrets.token_urlsafe(24)
+        req.state.session_id = session_id
+        save_session_state(session_id, {})
+
+    if response is not None:
+        response.set_cookie(
+            SESSION_COOKIE_NAME,
+            session_id,
+            max_age=SESSION_TTL_SECONDS,
+            path="/",
+            samesite="lax"
+        )
     return session_id
 
 def default_loc() -> dict:
@@ -161,18 +164,26 @@ def default_loc() -> dict:
         lat=38.76918,
         lon=-94.65635,
         date=date.today().isoformat(),
-        hours_start="",
+        hours_start="20:00",  # 8PM local time default start
         hours_end="",
+        scope_name="",
         fl_mm=0,
+        camera_name="",
         px_um=0.0,
         rows=0,
         cols=0,
         site_name="Powell Observatory",
-        ai_text=""
+        elevation=330.0,
+        timezone= DEFAULT_TIMEZONE,
+        ai_text="",
+        sql_query="SELECT * FROM dso_localized WHERE 1=1" # first time we start with everything.
     )
 
 def read_loc_session(req, response: Response | None = None) -> dict:
-    session_id = ensure_session_id(req, response) if response else get_session_id(req)
+    if response:
+        session_id = ensure_session_id(req, response)
+    else:
+        session_id = get_session_id(req) or getattr(req.state, "session_id", None)
     state = load_session_state(session_id) # returns a dict with all session data, including "loc" if it exists
     loc = default_loc()
     # dict.update merges the default loc with any values from the session, with session values taking precedence
@@ -210,8 +221,12 @@ LOC_PARAM_MAP = {
     "lat": "lat",
     "lon": "lon",
     "date": "date",
+    "elevation": "elevation",
+    "timezone": "timezone",
     "hstart": "hours_start",
     "hend": "hours_end",
+    "scope_name": "scope_name",
+    "camera_name": "camera_name",
     "fl_mm": "fl_mm",
     "px_um": "px_um",
     "rows": "rows",
@@ -291,15 +306,24 @@ def get_filters_from_mapping(qp) -> dict:
     q = (qp.get("q") or "").strip()
     a_constellation = qp.get("constellation") or "all"
     constellation = [a_constellation] # convert item to list, with "all" meaning no filtering
+    
     active_sel = qp.get("active") or "any"
     min_hours_viz = int(qp.get("min_hours_viz") or 0)
     min_coverage = int(qp.get("min_coverage") or 0)
     max_coverage = int(qp.get("max_coverage") or 1000)
     # max_hours_viz = int(qp.get("max_hours_viz") or 24)
+    
     classes = [c[0] for c in CLASSES if _parse_bool(qp.get(f"class_{c[0]}"))]
+    # if no classes are selected, treat it as if all are selected (i.e. no filtering)
+    if not classes or len(classes) == 0:
+        classes = ["all"]
+
     # object_types = [t[0] for t in stellarium_object_types if _parse_bool(qp.get(f"object_type_{t[0]}"))]
     # could handle lists but just one at a time for now
     object_types = [t[0] for t in stellarium_object_types if t[0] == qp.get("object_type")]
+    if not object_types or len(object_types) == 0:
+        object_types = ["all"]
+
     sortname = qp.get("sortname") or "dso_id"
     order = qp.get("order") or "asc"
     d = dict(q=q, constellation=constellation, active_sel=active_sel,
@@ -437,21 +461,57 @@ def loc_form(loc: dict) -> FT:
         hx_swap="outerHTML",
         hx_include="#filters-form"
     )(
-        Div(cls="grid2")(
-            Label("Site name",   Input(name="site_name", value=loc.get("site_name") or "")),
-            Label("Date",        Input(type="date", name="date", value=loc.get("date") or "")),
-            Label("Latitude",    Input(name="lat", value=loc.get("lat") or "")),
-            Label("Longitude",   Input(name="lon", value=loc.get("lon") or "")),
-            Label("Start hour",  Input(name="hstart", value=loc.get("hours_start") or "")),
-            Label("End hour",    Input(name="hend", value=loc.get("hours_end") or "")),
-            Label("Focal length (mm)", Input(name="fl_mm", value=loc.get("fl_mm") or "")),
-            Label("Pixel size (µm)",   Input(name="px_um", value=loc.get("px_um") or "")),
-            Label("Sensor rows", Input(name="rows", value=loc.get("rows") or "")),
-            Label("Sensor cols", Input(name="cols", value=loc.get("cols") or ""))),
-        
-        Div(cls="grid1")(
-            # note that textarea display value is inner text, not as a "value" attribute
-            Label("AI Text", Textarea(loc.get("ai_text") or "", name="ai_text", rows=4))
+        Div(cls="loc-grid")(
+            Fieldset(
+                Legend("Site"),
+                Div(cls="loc-fields")(
+                    Label("Site name",   Input(name="site_name", value=loc.get("site_name") or "")),
+                    Label("Latitude",    Input(name="lat", value=loc.get("lat") or "")),
+                    Label("Longitude",   Input(name="lon", value=loc.get("lon") or "")),
+                    Label("Elevation (m)", Input(name="elevation", value=loc.get("elevation") or "")),
+                    Label("Time zone",   Select(name="timezone")(
+                        Option("UTC", value="UTC", selected=(loc.get("timezone")=="UTC")),
+                        Option("Local (auto-detect)", value="local", selected=(loc.get("timezone")=="local")),
+                        Option("US/Eastern", value="US/Eastern", selected=(loc.get("timezone")=="US/Eastern")),
+                        Option("US/Central", value="US/Central", selected=(loc.get("timezone")=="US/Central")),
+                        Option("US/Mountain", value="US/Mountain", selected=(loc.get("timezone")=="US/Mountain")),
+                        Option("US/Pacific", value="US/Pacific", selected=(loc.get("timezone")=="US/Pacific")),
+                    )),
+                ),
+                cls="loc-section"
+            ),
+            Fieldset(
+                Legend("Date"),
+                Div(cls="loc-fields")(
+                    Label("Date",        Input(type="date", name="date", value=loc.get("date") or "")),
+                    Label("Start hour",  Input(name="hstart", value=loc.get("hours_start") or "")),
+                   # Label("End hour",    Input(name="hend", value=loc.get("hours_end") or "")),
+                ),
+                cls="loc-section"
+            ),
+            Fieldset(
+                Legend("Telescope"),
+                Div(cls="loc-fields")(
+                    Label("Telescope",    Input(name="scope_name", value=loc.get("scope_name") or "")),
+                    Label("Focal length (mm)", Input(name="fl_mm", value=loc.get("fl_mm") or "")),
+                ),
+                cls="loc-section"
+            ),
+            Fieldset(
+                Legend("Camera"),
+                Div(cls="loc-fields")(
+                    Label("Camera",       Input(name="camera_name", value=loc.get("camera_name") or "")),
+                    Label("Pixel size (µm)",   Input(name="px_um", value=loc.get("px_um") or "")),
+                    Label("Sensor rows", Input(name="rows", value=loc.get("rows") or "")),
+                    Label("Sensor cols", Input(name="cols", value=loc.get("cols") or "")),
+                ),
+                cls="loc-section"
+            ),
+        ),
+        Fieldset(
+            Legend("AI Context"),
+            Label("AI Text", Textarea(loc.get("ai_text") or "", name="ai_text", rows=4)),
+            cls="loc-ai"
         )
     )
 
@@ -778,7 +838,7 @@ def _serialize_fragments(content: Any) -> str:
 
 # ------------------------------- Routes --------------------------------------
 
-# fake AI placeholder for testing
+
 async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
     # in a real implementation, this would call the AI agent with the current loc and filters, and get back an updated loc and a SQL query to run
     # for now, just return the same loc and a dummy SQL query
@@ -789,15 +849,34 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
     updated_deps = AstroDependencies(
         # make sure these defaults are 'now' at runtime
         # note this should be CLIENT "now" not server!
-            default_time=datetime.now(ZoneInfo("America/Chicago")).strftime("%H:%M"),
-            default_date=datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d"),
-            default_timezone="America/Chicago",
-            default_location="Powell Observatory, Kansas", # this should be findable 
-            # default_latitude=38.7076,
-            # default_longitude=-94.7073,
-            default_telescope="Astrophysics 130EDF F6.3",
-            default_camera="ZWO ASI 2600MC Pro",
+        # if loc has a date and time, use that as the default for the AI agent, otherwise use current date and time
+        default_time=datetime.now(ZoneInfo("America/Chicago")).strftime("%H:%M"),
+        default_date=datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d"),
+        default_timezone="America/Chicago",
+        default_location="Powell Observatory, Kansas", # this should be findable 
+        # default_latitude=38.7076,
+        # default_longitude=-94.7073,
+        default_telescope="Astrophysics 130EDF F6.3",
+        default_camera="ZWO ASI 2600MC Pro",
     )
+    # if loc has specific values for these, override the defaults for the AI agent
+    if loc.get("lat") and loc.get("lon"):
+        updated_deps.default_latitude = loc["lat"]
+        updated_deps.default_longitude = loc["lon"]
+    if loc.get("date"):
+        updated_deps.default_date = loc["date"]
+    if loc.get("hours_start"):
+        updated_deps.default_time = loc["hours_start"]
+    if loc.get("site_name"):
+        updated_deps.default_location = loc["site_name"]
+    if loc.get("scope_name"):
+        updated_deps.default_telescope = loc["scope_name"]
+    if loc.get("camera_name"):
+        updated_deps.default_camera = loc["camera_name"]
+    # if loc.get("elevation"):
+    #     updated_deps.default_elevation = loc["elevation"]
+    if loc.get("timezone"):
+        updated_deps.default_timezone = loc["timezone"]
     
     user_query = loc['ai_text']
 
@@ -808,8 +887,7 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
     result = await single_agent_astro_plan.run(user_query, deps=updated_deps)
     ai_query = "" # the query we use to filter Dso, with or without AI help
     
-    if isinstance(result.output, SA_Plan) and result.output.valid_plan:
-        print(f"AI Agent returned valid plan with SQL: {result.output.sql_query}")
+    if isinstance(result.output, SA_Plan):
         # update loc with new info from plan
         if result.output.observer_context:
             loc['site_name'] = result.output.observer_context.location
@@ -817,16 +895,22 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
             loc['lon'] = result.output.observer_context.longitude_deg
             loc['date'] = result.output.observer_context.observe_date
             loc['hours_start'] = result.output.observer_context.observe_time 
+            loc['timezone'] = result.output.observer_context.timezone
             # loc['hours_end'] = result.output.observer_context.hours_end
         if result.output.equipment and result.output.equipment.telescope:
             loc['fl_mm'] = result.output.equipment.telescope.focal_length_mm
-            # loc['scope_name'] = result.output.equipment.telescope.name
+            loc['scope_name'] = result.output.equipment.telescope.name
         if result.output.equipment and result.output.equipment.camera:
             loc['px_um'] = result.output.equipment.camera.pixel_um
             loc['rows'] = result.output.equipment.camera.sensor_rows
             loc['cols'] = result.output.equipment.camera.sensor_columns
-            # loc['camera_name'] = result.output.equipment.camera.name
-        ai_query = result.output.sql_query
+            loc['camera_name'] = result.output.equipment.camera.name
+        if result.output.valid_plan:
+            ai_query = result.output.sql_query
+        else:
+            print(f"AI Agent returned invalid plan: {result.output}")
+            # FIXME return this to client via toast or popup!
+            ai_query = "SELECT * FROM dso_localized WHERE 1=1"  # fallback dummy query
     else:
         print(f"AI Agent returned non-plan output: {result.output}")
         # FIXME return this to client via toast or popup!
@@ -954,10 +1038,16 @@ def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization
     filters = filters_override or get_filters(req)
     localization = localization_override or get_loc(req)
     
-    print(f"---->>>>loading raw data for /table with sortname:{sortname}, order:{order}")
-    raw_data = load_filter_localize_data(db_path, filters, localization, sortname, order)
+    # print(f"---->>>>loading raw data for /table with sortname:{sortname}, order:{order}")
+    # raw_data = load_filter_localize_data(db_path, filters, localization, sortname, order)
+    
+    # debug test for now
+    session_id = ensure_session_id(req)
+    assert session_id is not None, "Session ID should not be None in /rows route"
+    raw_data = load_localize_filter_expand_sort_dso_data(session_id, db_path, filters, localization, sortname, order)
+    print(f"Test load_localize_filter_expand_sort_dso_data returned {len(raw_data)} rows for session {session_id}")
 
-    trs = rows(req, page=1, sortname=sortname, order=order, raw_data=raw_data)  # call the route function directly to get first page
+    trs = rows(req, page=1, sortname=sortname, order=order, raw_data=raw_data, localization=localization)  # call the route function directly to get first page
 
     # if there are no rows, return an empty table with no headers since we need rows to get dynamic headers
     if not trs or len(raw_data) == 0:
@@ -1006,7 +1096,8 @@ def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization
 
 # def rows(req, page: int = 2, sort: str = "dso_id", order: str = "asc", row_data:list[dict]|None=None) -> tuple[FT,...]:
 @rt
-def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc", raw_data: list[dict]|None = None): #  -> tuple[FT,...]:
+def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc", 
+         raw_data: list[dict]|None = None, localization: dict = {}): #  -> tuple[FT,...]:
     """Return the *next page* of <tr> elements. The last <tr> becomes the new sentinel.
     Since the triggering row uses hx-swap=afterend, these rows are inserted after it.
     """
@@ -1024,25 +1115,24 @@ def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc", raw_d
     # if we already have the data (on index page fetch), use it; otherwise (htmx) load from DB
     if raw_data is not None:
         print(f"Using passed raw_data with {len(raw_data)} rows. Request: {req.query_params}")
-        localization = get_loc(req)
-        print(f"Using localization: {localization}")
+        localization = localization or get_loc(req)  # if localization not passed in, get it from the request
+        # print(f"Using localization: {localization}")
         # FIXME should sort the raw_data here using cookie values for loc??
         sorted_rows = raw_data
     else:
-        filters     = get_filters(req)
+        # filters     = get_filters(req)
+        # localization = get_loc(req) 
+        # print(f"loading raw data for HTMX ROWS page {page} Request: {req.query_params} ")
+        # sorted_rows = load_filter_localize_data(db_path, filters, localization, sortname, order)
+        
+        session_id = ensure_session_id(req)
+        filters2     = get_filters(req)
         localization = get_loc(req) 
-        print(f"loading raw data for HTMX ROWS page {page} Request: {req.query_params} ")
-        sorted_rows = load_filter_localize_data(db_path, filters, localization, sortname, order)
+        assert session_id is not None, "Session ID should not be None in /rows route"
+        sorted_rows = load_localize_filter_expand_sort_dso_data(session_id, db_path, filters2, localization, sortname, order)
+        print(f"Test load_localize_filter_expand_sort_dso_data returned {len(sorted_rows)} rows for session {session_id}")
 
     # debug test for now
-    session_id = get_session_id(req)
-    filters2     = get_filters(req)
-    localization2 = get_loc(req) 
-    assert session_id is not None, "Session ID should not be None in /rows route"
-    dso_test = load_localize_filter_expand_sort_dso_data(session_id, db_path, filters2, localization2, sortname, order)
-    print(f"Test load_localize_filter_expand_sort_dso_data returned {len(dso_test)} rows for session {session_id}")
-
-    print(f"After filtering, {len(sorted_rows)} rows match criteria")
     
     start = (page - 1) * PAGE_SIZE
     end   = start + PAGE_SIZE

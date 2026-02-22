@@ -208,21 +208,21 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
                 continue
         
         # filter out by class if needed
-        # for 'constellation': ['all'],
-        # for 'classes': either [] for all, or list ['Neb']
-        # same for 'object_types': [] for all, or ['SNR', 'xxx'],
-        if 'classes' in filters and filters['classes'] and "all" not in filters['classes']:
+        # for 'constellation': ['all'], or list of constellations to include, e.g. ['Ori', 'And']
+        # for 'classes': either ['all'] for all, or list ['Neb']
+        # same for 'object_types': ['all'' for all, or ['SNR', 'xxx'],
+        if 'classes' in filters and filters['classes'] != ['all']:
             if dso['class'] not in filters['classes']:
                 continue
         
         # filter out by constellation if needed
-        if 'constellation' in filters and filters['constellation'] and len(filters['constellation'])>0:
+        if 'constellation' in filters and filters['constellation'] != ['all']:
             if dso['constellation_abbr'] not in filters['constellation']:
                 continue
         
         # filter out by object type if needed
-        if 'object_types' in filters and filters['object_types'] and len(filters['object_types'])>0:
-            if dso['object_type'] not in filters['object_types']:
+        if 'object_types' in filters and filters['object_types'] != ['all']:
+            if dso['type'] not in filters['object_types']:
                 continue
         
         # add score field for sorting and filtering (random for now)
@@ -252,12 +252,13 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         lat = localization.get('lat', 38.76918)
         lon = localization.get('lon', -94.65635)
         elev = localization.get('elevation', 330.0)
-        start_date_str = localization.get('date', None)
+        start_date = localization.get('date', None)
+        start_time = localization.get('hours_start', "20:00") # default to 8PM local time if not provided
         
-        if start_date_str is None:
+        if start_date is None:
             start_date = datetime.now(tz=ZoneInfo(user_timezone))
         else:
-            start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+            start_date = datetime.strptime(start_date, '%Y-%m-%d')
             start_date = start_date.replace(tzinfo=ZoneInfo(user_timezone))
 
         # fake coverage for now - revisit FIXME
@@ -272,7 +273,7 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         # for now, first time will be what user queried, then add 5 more obs times at 1 hour intervals
         # consider rounding to nearest hour? but that would mess up Agent's logic?
         NUMBER_OBS_TIMES = 6
-        start_obs_time = datetime.combine(start_date, time(20,0,0)).replace(tzinfo=ZoneInfo(user_timezone)) 
+        start_obs_time = datetime.combine(start_date, datetime.strptime(start_time, "%H:%M").time()).replace(tzinfo=ZoneInfo(user_timezone)) 
         obs_times = [start_obs_time + timedelta(hours=i) for i in range(0, NUMBER_OBS_TIMES)]
         
         results = ra_dec_to_altaz_airmass_multiple_times(
@@ -330,10 +331,8 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
     return sorted_dso_list
 
 
-
-
-# This is the old pre-ai code - save for reference
-def load_filter_localize_data(db_path: Path, 
+# This is the OLD pre-ai code - save for reference
+def OLDload_filter_localize_data(db_path: Path, 
     filters:dict, localization:dict,
     sort_key:str, order:str) -> list[dict]:
     # since we have no state between calls, just load all data each time
@@ -381,7 +380,7 @@ def load_filter_localize_data(db_path: Path,
     raw_data = load_dso_subset(
         db_path,
         name=filters.get('q',''),
-        cls=filters.get('classes',[]),
+        cls=filters.get('classes',['all']),
         constellation_abbrev=filters.get('constellation',["all"]),
         object_types=filters.get('object_types',["all"])
     )
@@ -589,6 +588,7 @@ def load_dso_by_id(dso_id: str, db_path: Path) -> Optional[dict]:
         return None
     return dict(zip([column[0] for column in cursor.description], row))
 
+# not currently used
 def load_dso_subset(db_path: Path, name: str, cls: list[str], 
                     constellation_abbrev: list[str], object_types:list[str]) -> list[dict]:
     # using db from load_stellarium_data_to_sqlite.py
@@ -614,7 +614,9 @@ def load_dso_subset(db_path: Path, name: str, cls: list[str],
         query += ' AND (LOWER(name) LIKE ? OR LOWER(catalog) LIKE ?)'
         params.append(f'%{name.lower()}%')
         params.append(f'%{name.lower()}%')
-    if cls and len(cls) > 0:
+    if cls == ["all"]:
+        pass
+    elif cls and len(cls) > 0:
         query += ' AND class IN ({})'.format(','.join('?' * len(cls)))
         params.extend(cls)
     # hack list with "all" means no filtering
