@@ -42,6 +42,7 @@ class AstroDependencies:
     default_location: str = "Powell Observatory, Kansas" # this should be findable and is near the default lat/long
     default_latitude: float = 38.6463 # 38.7076
     default_longitude: float = -94.7000 # -94.7073
+    default_elevation: float = 300.0  # in meters, for atmospheric calculations, etc.
     # FIXME this should reflect the browser not the server!
     default_date: str = datetime.datetime.now(ZoneInfo(default_timezone)).strftime("%Y-%m-%d")
     default_time: str = datetime.datetime.now(ZoneInfo(default_timezone)).strftime("%H:%M") # now time in HH:MM
@@ -59,8 +60,8 @@ class Camera(BaseModel):
 
 class Telescope(BaseModel):
     name: str
-    focal_length_mm: PositiveFloat = Field(..., description="The focal length of the telescope in millimeters")
-    f_ratio: PositiveFloat = Field(..., description="The f-ratio of the telescope")
+    focal_length_mm: PositiveFloat
+    f_ratio: PositiveFloat
 
 class Equipment(BaseModel):
     telescope: Optional[Telescope] = None
@@ -70,6 +71,7 @@ class ObserverContext(BaseModel):
     location: str = Field(..., description="The location and/or site name as specified by the user, in string form. For example: 'Backyard in Stilwell, KS'.")
     latitude_deg: float | None = Field(default=None, description="The latitude in  degrees. If not available leave as None.")
     longitude_deg: float | None = Field(default=None, description="The longitude in  degrees. If not available leave as None.")
+    elevation_m: float | None = Field(default=None, description="The elevation in meters. If not available leave as None.")
     observe_date: str | None = Field(default=None, description="The observation date, in local terms, as a string e.g. '2024-06-15'. If not available leave as None.")
     observe_time: str | None = Field(default=None, description="The observe time, in local hours as a string e.g. '22:00' or `8PM`. If not available leave as None.")
     #end_time_local: str | None = Field(default=None, description="The local end time in hours of the observation session as a string, e.g. '02:00'. If not available leave as None.")

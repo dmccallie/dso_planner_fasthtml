@@ -185,6 +185,7 @@ def ra_dec_to_altaz_airmass_multiple_times(
     dec: float,
     observer_lat: float, 
     observer_lon: float, 
+    observer_elevation: float,
     datetime_list: List[datetime]
 ) -> list[dict[str, Union[float, datetime]]]:
     """
@@ -210,8 +211,7 @@ def ra_dec_to_altaz_airmass_multiple_times(
     """
     
     # Create observer location
-    observer = astro.Observer(observer_lat, observer_lon, 0.0)  # 0.0 = sea level
-    
+    observer = astro.Observer(observer_lat, observer_lon, observer_elevation) 
     # Convert RA from degrees to hours for Astronomy Engine
     ra_hours = ra / 15.0
     
@@ -767,7 +767,7 @@ def get_data_for_dso_moon_chart(dso:dict, obs_lat, obs_long, obs_date, sample_ho
 # code below here was added for AI tools to be merged into original astronomy_utils.py
 
 
-def ai_localize_dso(ra:float, dec:float, observer_lat: float, observer_lon: float, date_iso: str, tzname: str) \
+def ai_localize_dso(ra:float, dec:float, observer_lat: float, observer_lon: float, obs_dt: datetime, tzname: str) \
                 -> tuple[float, float, float, bool, Optional[str], Optional[str], Optional[str]]:
     """
     Localize a dso at ra,dec for a given observer location and time.
@@ -775,14 +775,13 @@ def ai_localize_dso(ra:float, dec:float, observer_lat: float, observer_lon: floa
     TODO consider batching all DSO at once for efficiency.
     """
 
-    # Parse the ISO date string into a timezone-aware datetime object
-    # FIXME - make AI aware of timezones!!
-    obs_date = datetime.fromisoformat(date_iso)
+
+    obs_date = obs_dt
     if obs_date.tzinfo is None:
         print(f"[ai_localize_dso] surprise! obs_date is naive, assuming {tzname} timezone")
         obs_date = obs_date.replace(tzinfo=ZoneInfo(tzname))  # Default timezone
 
-    # print(f"[ai_localize_dso] using obs_date: {obs_date} (tzinfo={obs_date.tzinfo}) passed in: {date_iso}, tzname: {tzname})")
+    print(f"[ai_localize_dso] using obs_date: {obs_date} (tzinfo={obs_date.tzinfo}) passed in: {obs_dt}, tzname: {tzname})")
 
     if observer_lat is None or observer_lon is None:
         print("Surprise! Observer latitude or longitude is None, cannot localize DSO.")
@@ -948,8 +947,8 @@ def ai_localize_dso(ra:float, dec:float, observer_lat: float, observer_lon: floa
         if transit_time and (rise_time is None or set_time is None):
             transit_astro_time = astro.Time(datetime_to_astronomy_time(transit_time))
             try:
-                horizontal = astro.Horizon(transit_astro_time, observer, ra_hours, dec, astro.Refraction.Normal)
-                if horizontal.altitude > 0:
+                horizontal2 = astro.Horizon(transit_astro_time, observer, ra_hours, dec, astro.Refraction.Normal)
+                if horizontal2.altitude > 0:
                     circumpolar = True
                     never_visible = False
                 else:

@@ -164,9 +164,10 @@ single_agent_astro_plan = Agent(
 
     - Here are instructions on how to infer observer context from user input:
         - From the user's textual description, extract or infer the following fields into the SA_Plan's ObserverContext:
-             location, latitude_deg, longitude_deg, observe_date, observe_time, and timezone.
+             location, latitude_deg, longitude_deg, elevation_m, observe_date, observe_time, and timezone.
         - Follow these rules when inferring the ObserverContext:
         - If the user provides a location, infer the latitude and longitude if possible.
+        - If the user provides a location, infer the elevation in meters if possible.
   
         - If the user's location references ASKC's Dark Sky Site, use longitude = -94.53, latitude = 38.21
   

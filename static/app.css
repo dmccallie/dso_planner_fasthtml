@@ -7,6 +7,58 @@ fieldset { border:1px solid gray; padding:.4rem; border-radius:.3rem; }
 .actions { display:flex; gap:3.0rem; }
 .end-of-results td { color: var(--muted-color); }
 
+/* top localization banner */
+.locbar {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1rem;
+  padding: .6rem .8rem;
+  border: 1px solid gray;
+  border-radius: .35rem;
+  cursor: pointer;
+}
+.locbar-top {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 1rem;
+}
+.locbar-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .75rem;
+}
+.locbar-item {
+  min-width: 0;
+}
+.locbar-title {
+  display: block;
+  font-size: 1.05rem;
+  line-height: 1.15;
+  margin-bottom: .08rem;
+}
+.locbar-detail {
+  display: block;
+  line-height: 1.15;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.locbar-ai {
+  display: flex;
+  align-items: flex-start;
+  gap: .4rem;
+  font-size: .95rem;
+  line-height: 1.2;
+}
+.locbar-ai-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /* buttons in fieldset to line up across the page using flex grid */
 fieldset .actions { display: flex; flex-wrap: wrap }
 
@@ -168,6 +220,13 @@ dialog.modal .footer {
   dialog.modal .grid2 { grid-template-columns: 1fr; }
   dialog.modal .loc-grid { grid-template-columns: 1fr; }
   dialog.modal .loc-fields { grid-template-columns: 1fr; }
+  .locbar-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .locbar-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* dso alitude graph and moon illum charts */

@@ -30,19 +30,21 @@ def load_localize_filter_expand_sort_dso_data(session_id: str, db_path: Path, fi
     # make sure we have the required localization parameters or fail since defaults have already been applied
     assert 'lat' in localization, "Localization must include 'lat'"
     assert 'lon' in localization, "Localization must include 'lon'"
-    # assert 'elevation' in localization, "Localization must include 'elevation'"
+    assert 'elevation' in localization, "Localization must include 'elevation'"
     assert 'date' in localization, "Localization must include 'date'"
     assert 'hours_start' in localization, "Localization must include 'hours_start'"
 
     # assert 'timezone' in localization, "Localization must include 'timezone'"
     
-    user_timezone = "America/Chicago" # FIXME
-    elevation = localization.get('elevation', 330.0) # default elevation in meters if not provided FIXME
+    user_timezone = localization.get("timezone", "America/Chicago") # FIXME
+    elevation = localization.get('elevation', 300.0) # default elevation in meters if not provided FIXME
 
     # localize and select subset of data based on ai_query and localization
     # will create table containing localized data, then apply SQL to fetch subset
     dso_list = get_localized_dso_data(session_id, db_path, localization['sql_query'], localization['lat'], localization['lon'],
-                                      localization['date'], localization['hours_start'], user_timezone)
+                                      localization['elevation'], localization['date'], localization['hours_start'], user_timezone)
+    
+    print(f"dso list returns from get_localized_dso_data {[('name', row['name'], 'altitude', row['altitude']) for row in dso_list]}")
 
     #expand dso_data and apply dynamic filtering and sorting based on filters and sort_key
     dso_list = expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list, localization, filters, sort_key, order)
@@ -50,7 +52,7 @@ def load_localize_filter_expand_sort_dso_data(session_id: str, db_path: Path, fi
     return dso_list
 
 def get_localized_dso_data(session_id: str, db_path: Path, sql_query: str, observer_lat: float, observer_lon: float,
-                            observe_date:str, observe_time: str, timezone:str ) -> list[dict]:
+                            elevation: float, observe_date_str:str, observe_time_str: str, timezone:str ) -> list[dict]:
     # uses a session-keyed db table to cache localized data accros calls where localization is the same
     # observe date and time are strings, assumed to be in local timezone
 
@@ -73,13 +75,19 @@ def get_localized_dso_data(session_id: str, db_path: Path, sql_query: str, obser
         """
     
     # hash for localization parameters to use as key in db to cache localized data for each unique localization/session
-    def create_hash(observer_lat: float, observer_lon: float, observe_date_iso:str) -> str:
-        raw = f"lat:{observer_lat}_lon:{observer_lon}_date:{observe_date_iso}"
+    def create_hash(observer_lat: float, observer_lon: float, elevation: float, observe_date_iso:str) -> str:
+        raw = f"lat:{observer_lat}_lon:{observer_lon}_elev:{elevation}_date:{observe_date_iso}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
     
     
     assert sql_query is not None and sql_query.strip() != "", "SQL query was missing from localization"
     assert session_id is not None and session_id.strip() != "", "Session ID is required to fetch localized DSO data"
+    assert observer_lat is not None, "Observer latitude is required to fetch localized DSO data"
+    assert observer_lon is not None, "Observer longitude is required to fetch localized DSO data"
+    assert elevation is not None, "Observer elevation is required to fetch localized DSO data"
+    assert observe_date_str is not None and observe_date_str.strip() != "", "Observe date is required to fetch localized DSO data"
+    assert observe_time_str is not None and observe_time_str.strip() != "", "Observe time is required to fetch localized DSO data"
+    assert timezone is not None and timezone.strip() != "", "Timezone is required to fetch localized DSO data"
 
     # first time, make sure the localized dso table and indexes exist
     with sqlite3.connect(db_path) as conn:
@@ -114,18 +122,18 @@ def get_localized_dso_data(session_id: str, db_path: Path, sql_query: str, obser
     
     # clean up date and time
     # ensure we have no seconds in time string (AI puts them there sometimes)
-    if len(observe_time.split(":")) == 3:
-        observe_time = ":".join(observe_time.split(":")[0:2])
+    if len(observe_time_str.split(":")) == 3:
+        observe_time_str = ":".join(observe_time_str.split(":")[0:2])
+    
+    observe_date = datetime.strptime(observe_date_str, '%Y-%m-%d') # user's string
+    observe_date = observe_date.replace(tzinfo=ZoneInfo(timezone)) # user's tz
+        
+    observe_dt = datetime.combine(observe_date, 
+                   datetime.strptime(observe_time_str, "%H:%M").time()).replace(tzinfo=ZoneInfo(timezone)) 
 
-    # date_iso = f"{observe_date}T{observe_time}"
-    dt = datetime.strptime(f"{observe_date} {observe_time}", "%Y-%m-%d %H:%M")
+    print(f"[ai_localize_and_fetch_dsos] recreate full datetime = {observe_dt.isoformat()} for ({timezone})")
 
-    # attach timezone
-    dt = dt.replace(tzinfo=ZoneInfo(timezone))
-    print(f"[ai_localize_and_fetch_dsos] recreate full datetime = {dt.isoformat()} for ({timezone})")
-
-    # FIXME add elevation
-    loc_hash = create_hash(observer_lat, observer_lon, dt.isoformat())
+    loc_hash = create_hash(observer_lat, observer_lon, elevation, observe_dt.isoformat())
 
     # wrap the ai sql inside the CTE that joins with the localized data for this session and localization
     final_sql_query = wrap_ai_sql_in_cte(sql_query)
@@ -135,15 +143,23 @@ def get_localized_dso_data(session_id: str, db_path: Path, sql_query: str, obser
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        # use the passed in query string to fetch from localized view
-        cursor.execute(final_sql_query, (session_id, loc_hash))
-        rows = cursor.fetchall()
-        if rows and len(rows) > 0:
-            print(f"FOUND {len(rows)} localized DSO records for session {session_id} and loc_hash {loc_hash}")
-            return [dict(row) for row in rows]
-        
+        # first see if there are any localized records for this session and localization
+        cursor.execute('SELECT COUNT(*) as count FROM dso_localization_values WHERE session_id = ? AND loc_hash = ?', (session_id, loc_hash))
+        count_row = cursor.fetchone()
+        count = count_row['count'] if count_row is not None else 0
+        if count > 0:
+            cursor.execute(final_sql_query, (session_id, loc_hash))
+            rows = cursor.fetchall()
+            if rows and len(rows) > 0:
+                print(f"FOUND {len(rows)} localized DSO records for session {session_id} and loc_hash {loc_hash}")
+                return [dict(row) for row in rows]
+            else:
+                # our query found no qualified records, but we do have localized data for this session and localization, so return empty result
+                print(f"NO matching DSO records found for session {session_id} and loc_hash {loc_hash}")
+                return []        
+            
         # we have no data for this session and localization, so we need to create it
-        print(f"No localized DSO records found for session {session_id} and loc_hash {loc_hash}, CREATING NEW localized data")
+        print(f"No existing localized DSO records found for session {session_id} and loc_hash {loc_hash}, SO CREATING NEW localized data")
 
         # spin through the raw DSO data and calculate the localization values for each, then insert into the localized values table
         conn.commit()
@@ -162,7 +178,7 @@ def get_localized_dso_data(session_id: str, db_path: Path, sql_query: str, obser
             dec_dd = dso['dec_dd']
 
             altitude, azimuth, air_mass, visible, rise_time, transit_time, set_time = \
-                  ai_localize_dso(ra_dd, dec_dd, observer_lat, observer_lon, dt.isoformat(), timezone)
+                  ai_localize_dso(ra_dd, dec_dd, observer_lat, observer_lon, observe_dt, timezone)
             
             localization_records.append((session_id, loc_hash, dso_id, altitude, azimuth, air_mass, rise_time, set_time, transit_time, datetime.now().isoformat()))
 
@@ -191,12 +207,25 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
     # output is list of dso dicts with extra fields needed for display and filtering
 
     # try to filter first to reduce computation of expansion fields.
-
-    user_timezone = "America/Chicago" # FIXME
-    elevation = localization.get('elevation', 330.0) # default elevation in meters if not provided FIXME
+ 
+    user_timezone = localization.get("timezone", "America/Chicago") #FIXME
 
     # we may skip rows to save time, so build a new list of results rather than modifying in place
     dso_results = []
+
+    # precompute sensor size in arcmin if we have the needed localization params, since it's used in the loop
+    if localization.get('fl_mm', None) is not None and \
+        localization.get('px_um', 0.0) != 0.0 and \
+        localization.get('rows', 0) != 0 and \
+        localization.get('cols', 0) != 0:
+        # compute pixel scale in arcsec/pixel
+        fl_mm = localization['fl_mm']
+        px_um = localization['px_um']
+        fov_width_px = localization['cols']
+        fov_height_px = localization['rows']
+        width_amin, height_amin = calculate_sensor_fov_amin(fl_mm, px_um,fov_width_px, fov_height_px)
+    else:
+        width_amin, height_amin = None, None
 
     for dso in dso_list:
         
@@ -251,7 +280,7 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         # FIXME make this a common routine
         lat = localization.get('lat', 38.76918)
         lon = localization.get('lon', -94.65635)
-        elev = localization.get('elevation', 330.0)
+        elevation = localization.get('elevation', 300.0)
         start_date = localization.get('date', None)
         start_time = localization.get('hours_start', "20:00") # default to 8PM local time if not provided
         
@@ -261,8 +290,17 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
             start_date = datetime.strptime(start_date, '%Y-%m-%d')
             start_date = start_date.replace(tzinfo=ZoneInfo(user_timezone))
 
-        # fake coverage for now - revisit FIXME
-        dso['coverage'] = int(200 * random()) # random int from 0 to 100 for now
+        if width_amin is not None and height_amin is not None and \
+           dso.get('maj_axis', None) is not None:  # only must have major axis
+
+            dso_maj_axis = dso['maj_axis'] # arcmin
+            dso_min_axis = dso['min_axis']
+
+            sens_cov = get_sensor_coverage(dso_min_axis, dso_maj_axis, width_amin, height_amin)
+
+            dso['coverage'] = int(sens_cov) # already in percent (0.0-100.0)
+        else:
+            dso['coverage'] = 0
 
         # filter out records by coverage
         if 'min_coverage' in filters and dso['coverage'] < filters['min_coverage']:
@@ -276,11 +314,13 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         start_obs_time = datetime.combine(start_date, datetime.strptime(start_time, "%H:%M").time()).replace(tzinfo=ZoneInfo(user_timezone)) 
         obs_times = [start_obs_time + timedelta(hours=i) for i in range(0, NUMBER_OBS_TIMES)]
         
+        # debugging - this one is correct
         results = ra_dec_to_altaz_airmass_multiple_times(
             ra=dso['ra_dd'],
             dec=dso['dec_dd'],
             observer_lat=lat,
             observer_lon=lon,
+            observer_elevation=elevation,
             datetime_list=obs_times
         )
 

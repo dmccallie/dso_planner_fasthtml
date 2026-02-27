@@ -173,7 +173,7 @@ def default_loc() -> dict:
         rows=0,
         cols=0,
         site_name="Powell Observatory",
-        elevation=330.0,
+        elevation=300.0,
         timezone= DEFAULT_TIMEZONE,
         ai_text="",
         sql_query="SELECT * FROM dso_localized WHERE 1=1" # first time we start with everything.
@@ -342,28 +342,61 @@ def get_filters(req) -> dict:
 
 def localization_bar(loc: dict, oob=False) -> FT:
     # compute any derived values here (pixel scale, FOV, darkness window…)
+    lat = loc.get("lat")
+    lon = loc.get("lon")
+    elevation = loc.get("elevation")
+    date_value = loc.get("date")
+    # format date as "20 Dec 2025" for display in the loc bar
+    if date_value:
+        try:
+            date_obj = date.fromisoformat(date_value)
+            date_value = date_obj.strftime("%d %b %Y")
+        except ValueError:
+            date_value = "????"
+
+    hours_start = loc.get("hours_start")
+    timezone = loc.get("timezone")
+    fl_mm = loc.get("fl_mm")
+    rows = int(loc.get("rows")) or 0
+    cols = int(loc.get("cols")) or 0
+    px_um = float(loc.get("px_um")) or 0.0
+
+    lat_lon_elev = f"{lat}, {lon}, {elevation}m"
+    date_time_details = f"{hours_start}, {timezone}"
+    scope_details = f"FL {fl_mm} mm"
+    camera_details = f"{rows} rows, {cols} cols, {px_um}\u00b5m"
+    ai_text = loc.get("ai_text") or ""
+    ai_query = loc.get("sql_query") or ""
+
     return Div(id="locbar", cls="locbar",
-               hx_swap_oob="true" if oob else "false",)(
-        Div(
-            Strong(loc.get("site_name") or "Location"),
-            Br(), Span(f"{loc.get('lat')}, {loc.get('lon')}")
+               hx_swap_oob="true" if oob else "false",
+               hx_get=loc_dialog,
+               hx_target="#loc-dialog-body",
+               hx_swap="innerHTML")(
+        Div(cls="locbar-top")(
+            Div(cls="locbar-grid")(
+                Div(cls="locbar-item")(
+                    Strong(loc.get("site_name") or "Site", cls="locbar-title"),
+                    Span(lat_lon_elev, cls="locbar-detail")
+                ),
+                Div(cls="locbar-item")(
+                    Strong(date_value or "Date", cls="locbar-title"),
+                    Span(date_time_details, cls="locbar-detail")
+                ),
+                Div(cls="locbar-item")(
+                    Strong(loc.get("scope_name") or "Scope", cls="locbar-title"),
+                    Span(scope_details, cls="locbar-detail")
+                ),
+                Div(cls="locbar-item")(
+                    Strong(loc.get("camera_name") or "Camera", cls="locbar-title"),
+                    Span(camera_details, cls="locbar-detail")
+                ),
+            ),
         ),
-        Div(
-            Strong(loc.get("scope_name") or "Telescope"),
-            Br(), Span(f"FL {loc.get('fl_mm')} mm")
+        Div(cls="locbar-ai")(
+            Strong("AI Text:"),
+            Span(ai_text + " | SQL Query: " + ai_query, cls="locbar-ai-text")
         ),
-        Div(
-            Strong(loc.get("camera_name") or "Camera"),
-            Br(), Span(f"{loc.get('cols')}×{loc.get('rows')} @ {loc.get('px_um')}µm")
-        ),
-        Div(
-            Button("Change",
-                   id="change-loc",
-                   hx_get=loc_dialog,
-                   hx_target="#loc-dialog-body",
-                   hx_swap="innerHTML"
-                )
-        )
     )
 
 def filter_form(filters: dict, loc: dict, oob=False) -> FT:
@@ -471,11 +504,11 @@ def loc_form(loc: dict) -> FT:
                     Label("Elevation (m)", Input(name="elevation", value=loc.get("elevation") or "")),
                     Label("Time zone",   Select(name="timezone")(
                         Option("UTC", value="UTC", selected=(loc.get("timezone")=="UTC")),
-                        Option("Local (auto-detect)", value="local", selected=(loc.get("timezone")=="local")),
-                        Option("US/Eastern", value="US/Eastern", selected=(loc.get("timezone")=="US/Eastern")),
-                        Option("US/Central", value="US/Central", selected=(loc.get("timezone")=="US/Central")),
-                        Option("US/Mountain", value="US/Mountain", selected=(loc.get("timezone")=="US/Mountain")),
-                        Option("US/Pacific", value="US/Pacific", selected=(loc.get("timezone")=="US/Pacific")),
+                        # Option("Local (auto-detect)", value="local", selected=(loc.get("timezone")=="local")),
+                        Option("America/New_York", value="America/New_York", selected=(loc.get("timezone")=="America/New_York")),
+                        Option("America/Chicago", value="America/Chicago", selected=(loc.get("timezone")=="America/Chicago")),
+                        Option("America/Denver", value="America/Denver", selected=(loc.get("timezone")=="America/Denver")),
+                        Option("America/Los_Angeles", value="America/Los_Angeles", selected=(loc.get("timezone")=="America/Los_Angeles")),
                     )),
                 ),
                 cls="loc-section"
@@ -873,8 +906,8 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
         updated_deps.default_telescope = loc["scope_name"]
     if loc.get("camera_name"):
         updated_deps.default_camera = loc["camera_name"]
-    # if loc.get("elevation"):
-    #     updated_deps.default_elevation = loc["elevation"]
+    if loc.get("elevation"):
+        updated_deps.default_elevation = loc["elevation"]
     if loc.get("timezone"):
         updated_deps.default_timezone = loc["timezone"]
     
@@ -893,6 +926,7 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
             loc['site_name'] = result.output.observer_context.location
             loc['lat'] = result.output.observer_context.latitude_deg
             loc['lon'] = result.output.observer_context.longitude_deg
+            loc['elevation'] = result.output.observer_context.elevation_m
             loc['date'] = result.output.observer_context.observe_date
             loc['hours_start'] = result.output.observer_context.observe_time 
             loc['timezone'] = result.output.observer_context.timezone
