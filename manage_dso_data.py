@@ -105,7 +105,7 @@ def get_localized_dso_data(session_id: str, db_path: Path, sql_query: str, obser
                 rise_time TEXT, /* iso format full datetime string for utc */
                 set_time TEXT, /* iso format full datetime string for utc */
                 transit_time TEXT, /* iso format full datetime string for utc */
-
+                
                 created_at TEXT NOT NULL,
             PRIMARY KEY (session_id, loc_hash, dso_id),
             FOREIGN KEY (dso_id) REFERENCES dso(dso_id)
@@ -343,6 +343,15 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         # fake hours_viz for now - revisit FIXME
         dso['hours_viz'] = number_hours_viz
 
+        # print(f"distance check: distance = {dso.get('angular_distance_deg', 'n/a')} for DSO {dso['name']} with altitudes {[dso[f'obsTime{i}_alt'] for i in range(0, NUMBER_OBS_TIMES)]} and airmasses {[results[i]['airmass'] if results[i] is not None else 'n/a' for i in range(0, NUMBER_OBS_TIMES)]} and hours_viz {dso['hours_viz']}")
+        # add distance for this queries that use distance or n/a
+        # format distance to 1 decimal place if it's a number
+        distance = dso.get('angular_distance_deg', 'n/a')
+        if isinstance(distance, (int, float)):
+            dso['distance'] = f"{distance:.1f}"
+        else:
+            dso['distance'] = distance
+        
         # filter by hours_viz
         if 'min_hours_viz' in filters and dso['hours_viz'] < filters['min_hours_viz']:
             continue
@@ -354,7 +363,7 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         # skip filter by score
 
     # sort
-    VALID_SORTS = { "name", "catalog", "class", "constellation_abbr", "score", "type", "hours_viz", "vis_mag", "coverage", "rise_time", "transit_time", "set_time"}
+    VALID_SORTS = { "name", "catalog", "class", "constellation_abbr", "distance", "type", "hours_viz", "vis_mag", "coverage", "rise_time", "transit_time", "set_time"}
 
     if sort_key not in VALID_SORTS:
         print(f"Invalid sort key {sort_key}, defaulting to 'ra_dd'")

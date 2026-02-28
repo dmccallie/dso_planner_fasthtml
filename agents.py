@@ -103,37 +103,45 @@ single_agent_astro_plan = Agent(
 
      - If the user specifies distance measures for objects, consider these to be approximate angular distances
         and use ra_dd and dec_dd fields to compute them. So for example if the user says:
+        - When a distance-based filter is requested, include the computed distance in the result columns as angular_distance_deg.
         "Find objects within 5 degrees of RA 10h and Dec +20d",
         first convert RA 10h to degrees (150 degrees), then
         you should generate a SQL query like:
-            "SELECT * FROM dso_localized WHERE
-                SQRT(
-                    ( (ra_dd - 150.0) * COS(20.0 * PI() / 180.0) ) * 
-                    ( (ra_dd - 150.0) * COS(20.0 * PI() / 180.0) ) +
-                    (dec_dd - 20.0) * (dec_dd - 20.0)
-                ) <= 5.0
-            AND ... other criteria ... ;"
+            "SELECT q.*
+               FROM (
+                    SELECT dso_localized.*, 
+                           SQRT(
+                               ( (ra_dd - 150.0) * COS(20.0 * PI() / 180.0) ) *
+                               ( (ra_dd - 150.0) * COS(20.0 * PI() / 180.0) ) +
+                               (dec_dd - 20.0) * (dec_dd - 20.0)
+                           ) AS angular_distance_deg
+                    FROM dso_localized
+               ) AS q
+              WHERE q.angular_distance_deg <= 5.0
+                AND ... other criteria ... ;"
        
       - If the distance reference is an object in the catalog, use a subquery.
         For example, "Find objects within 3 degrees of M 31",
          you should generate a SQL query like:
-        SELECT d.*
-            FROM dso_localized AS d
-            CROSS JOIN (
-                SELECT ra_dd AS ref_ra,
-                    dec_dd AS ref_dec
-                FROM dso_localized
-                WHERE catalog = 'M 13'
-                LIMIT 1
-            ) AS ref
-            WHERE
-                -- angular separation (approx) in degrees
-                SQRT(
-                    ( (d.ra_dd - ref.ref_ra) * COS(ref.ref_dec * PI() / 180.0) ) * 
-                    ( (d.ra_dd - ref.ref_ra) * COS(ref.ref_dec * PI() / 180.0) ) +
-                    (d.dec_dd - ref.ref_dec) * (d.dec_dd - ref.ref_dec)
-                ) <= 3.0
-            AND ... other criteria ... ;
+        SELECT *
+          FROM (
+                SELECT d.*, 
+                       SQRT(
+                            ( (d.ra_dd - ref.ref_ra) * COS(ref.ref_dec * PI() / 180.0) ) * 
+                            ( (d.ra_dd - ref.ref_ra) * COS(ref.ref_dec * PI() / 180.0) ) +
+                            (d.dec_dd - ref.ref_dec) * (d.dec_dd - ref.ref_dec)
+                       ) AS angular_distance_deg
+                  FROM dso_localized AS d
+                  CROSS JOIN (
+                      SELECT ra_dd AS ref_ra,
+                          dec_dd AS ref_dec
+                      FROM dso_localized
+                      WHERE catalog = 'M 31'
+                      LIMIT 1
+                  ) AS ref
+          ) AS q
+         WHERE q.angular_distance_deg <= 3.0
+           AND ... other criteria ... ;
 
        - If asked to find objects near the a named constellation, use the constellation's central RA/Dec coordinates
        as the reference point for distance calculations.
@@ -324,7 +332,7 @@ async def return_dsos_observer_gear(ctx: RunContext[AstroDependencies], ai_query
                 altitude, azimuth, air_mass, visible, rise_time, transit_time, set_time = \
                   ai_localize_dso(dso_row['ra_dd'], dso_row['dec_dd'],
                      observer_context.latitude_deg, observer_context.longitude_deg,
-                     dt.isoformat(), local_tz)
+                     dt, local_tz)
             
             # insert into temp table
             cursor.execute("""

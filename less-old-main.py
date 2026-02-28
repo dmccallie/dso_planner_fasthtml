@@ -292,7 +292,7 @@ def render_rows(rows: list[dict]) -> list[FT]:
         # bg = SCORE_SCALE.css_rgba(r["score"]) # rgba(R,G,B,1)
 
         rgb = MATPLOTLIB_COLOR_SCALE_ALTITUDE.as_rgb_tuple(r["score"])
-        bg = MATPLOTLIB_COLOR_SCALE_ALTITUDE.as_css_rgba(r["score"])
+        bg = MATPLOTLIB_COLOR_SCALE_ALTITUDE.as_css(r["score"])
         
         fg = best_text_color(rgb)
 

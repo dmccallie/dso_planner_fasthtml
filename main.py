@@ -24,7 +24,7 @@ from starlette.responses import Response
 
 
 from ai_data_models import AstroDependencies, SA_Plan
-from color_utils import ColorScale, best_text_color, MapPlotLibColorScale
+from color_utils import ColorScale, HSL_Green_Scale, best_text_color, MapPlotLibColorScale
 
 from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_dso_positions, get_data_for_dso_moon_chart, \
     stellarium_object_types, DEFAULT_TIMEZONE
@@ -560,7 +560,12 @@ SCORE_SCALE = ColorScale(
 # using Matplotlib's extensive color mapping
 CS_ALT = MapPlotLibColorScale(
     model = "Greens",
-    vmin=0, vmax=80, 
+    vmin=0, vmax=90, 
+)
+
+HSL_GREEN = HSL_Green_Scale(
+    vmin=20, vmax=80,
+    lmin=10, lmax=50
 )
 
 # configuration stuff - column names, etc
@@ -594,7 +599,7 @@ def default_Td(col: ColumnConfig, row: dict) -> FT:
     val = row.get(col.name)
     if col.color_scale and val is not None:
         rgb = col.color_scale.as_rgb_tuple(val)
-        bg  = col.color_scale.as_css_rgba(val)
+        bg  = col.color_scale.as_css(val)
         fg  = best_text_color(rgb)
         style_accum.append(f"background:{bg}")
         style_accum.append(f"color:{fg}")
@@ -623,7 +628,7 @@ def altAzi_Td(col: ColumnConfig, row: dict) -> FT:
     color_val = row.get(col.name + "_alt")  # numeric value for altitude color scale
     if col.color_scale and color_val is not None and color_val >= MIN_ALT_FOR_COLOR:
         rgb = col.color_scale.as_rgb_tuple(color_val)
-        bg  = col.color_scale.as_css_rgba(color_val)
+        bg  = col.color_scale.as_css(color_val)
         fg  = best_text_color(rgb)
         style_accum.append(f"background:{bg}")
         style_accum.append(f"color:{fg}")
@@ -644,7 +649,7 @@ class ColumnConfig:
     sortable: bool = True
     hdr_cls: Optional[str] = "nowrap"  # optional class for the header TH
     cls: Optional[str] = None  # optional class for the column
-    color_scale: Optional["MapPlotLibColorScale"] = None
+    color_scale: Optional["HSL_Green_Scale"] = None
     header_fn: Optional[GetHeaderFn] = None # custom header generator
     renderTd_fn: Optional[RenderTdFn] = None # custom cell renderer
 
@@ -719,8 +724,13 @@ COL_FIGS: list[ColumnConfig]= [
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name="score", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=CS_ALT,
-        header_fn = lambda col, row: "SCR",
+    # ColumnConfig(name="score", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=CS_ALT,
+    #     header_fn = lambda col, row: "SCR",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
+
+    ColumnConfig(name="distance", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Dist",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
@@ -736,32 +746,32 @@ COL_FIGS: list[ColumnConfig]= [
     # # five more data / time columns algorithmically generated
 
     ColumnConfig(name="obsTime0", width="9%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime0_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
     ColumnConfig(name="obsTime1", width="9%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime1_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
     ColumnConfig(name="obsTime2", width="9%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime2_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
     ColumnConfig(name="obsTime3", width="9%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime3_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
     ColumnConfig(name="obsTime4", width="9%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime4_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
     ColumnConfig(name="obsTime5", width="10%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime5_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
