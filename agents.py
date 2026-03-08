@@ -60,6 +60,7 @@ single_agent_astro_plan = Agent(
             rise_time TEXT, /* an ISO 8601 datetime string */
             set_time TEXT, /* an ISO 8601 datetime string */
             transit_time TEXT, /* an ISO 8601 datetime string */
+            angular_distance_deg REAL /* this field will only be present if the SQL query includes a distance-based filter and calculation, otherwise it will be null or absent */
         );
      - Note that "catalog" contains the catalog prefix as well as the catalog number or name, e.g., "M 31", "NGC 1976", etc.
         So to fetch all Messier objects, the query would be: SELECT * FROM dso_localized WHERE catalog LIKE 'M %';
@@ -153,7 +154,7 @@ single_agent_astro_plan = Agent(
         - Then generate a SQL query like:
         "SELECT * FROM dso_localized WHERE rise_time < '2024-03-16T03:00:00Z' AND ... other criteria ... ;"
 
-      - If the user does not specify a minumn altitude, assume 20 degrees as the minimum altitude for observable objects.
+      - Use the specified values or the default minimum altitude and maximum altitude for deep space objects.
       - There is no need to limit by azimuth, air mass, rise/set/transit times unless specifically requested by the user.
       - There is no need to order the results unless specifically requested by the user.
 
@@ -233,6 +234,9 @@ async def custom_instructions(ctx: RunContext[AstroDependencies]) -> str:
     - Use the following run-time defaults when inferring missing equipment information:
         - default telescope: {ctx.deps.default_telescope}
         - default camera: {ctx.deps.default_camera}
+    - Use the following run-time defaults when inferring missing DSO altitude range information:
+        - default minimum altitude: {ctx.deps.default_min_altitude} degrees
+        - default maximum altitude: {ctx.deps.default_max_altitude} degrees
     """
 
 # @astro_agent.tool

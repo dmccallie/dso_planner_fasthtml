@@ -781,7 +781,7 @@ def ai_localize_dso(ra:float, dec:float, observer_lat: float, observer_lon: floa
         print(f"[ai_localize_dso] surprise! obs_date is naive, assuming {tzname} timezone")
         obs_date = obs_date.replace(tzinfo=ZoneInfo(tzname))  # Default timezone
 
-    print(f"[ai_localize_dso] using obs_date: {obs_date} (tzinfo={obs_date.tzinfo}) passed in: {obs_dt}, tzname: {tzname})")
+    # print(f"[ai_localize_dso] using obs_date: {obs_date} (tzinfo={obs_date.tzinfo}) passed in: {obs_dt}, tzname: {tzname})")
 
     if observer_lat is None or observer_lon is None:
         print("Surprise! Observer latitude or longitude is None, cannot localize DSO.")

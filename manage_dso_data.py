@@ -105,6 +105,7 @@ def get_localized_dso_data(session_id: str, db_path: Path, sql_query: str, obser
                 rise_time TEXT, /* iso format full datetime string for utc */
                 set_time TEXT, /* iso format full datetime string for utc */
                 transit_time TEXT, /* iso format full datetime string for utc */
+                angular_distance_deg REAL, /* this field will be populated if the SQL query includes a distance-based filter and calculation, otherwise it will be null */
                 
                 created_at TEXT NOT NULL,
             PRIMARY KEY (session_id, loc_hash, dso_id),

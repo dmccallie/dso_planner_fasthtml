@@ -175,6 +175,8 @@ def default_loc() -> dict:
         site_name="Powell Observatory",
         elevation=300.0,
         timezone= DEFAULT_TIMEZONE,
+        min_altitude=20.0,
+        max_altitude=90.0,
         ai_text="",
         sql_query="SELECT * FROM dso_localized WHERE 1=1" # first time we start with everything.
     )
@@ -231,6 +233,8 @@ LOC_PARAM_MAP = {
     "px_um": "px_um",
     "rows": "rows",
     "cols": "cols",
+    "min_altitude": "min_altitude",
+    "max_altitude": "max_altitude",
     "ai_text": "ai_text",
     "sql_query": "sql_query"
 }
@@ -360,11 +364,15 @@ def localization_bar(loc: dict, oob=False) -> FT:
     rows = int(loc.get("rows")) or 0
     cols = int(loc.get("cols")) or 0
     px_um = float(loc.get("px_um")) or 0.0
+    min_altitude = loc.get("min_altitude") or 20.0
+    max_altitude = loc.get("max_altitude") or 90.0
 
     lat_lon_elev = f"{lat}, {lon}, {elevation}m"
     date_time_details = f"{hours_start}, {timezone}"
     scope_details = f"FL {fl_mm} mm"
     camera_details = f"{rows} rows, {cols} cols, {px_um}\u00b5m"
+    # degree symbol is \u00b0, micro symbol is \u00b5
+    altitude_details = f"Min: {min_altitude}\u00b0, Max: {max_altitude}\u00b0"
     ai_text = loc.get("ai_text") or ""
     ai_query = loc.get("sql_query") or ""
 
@@ -386,6 +394,10 @@ def localization_bar(loc: dict, oob=False) -> FT:
                 Div(cls="locbar-item")(
                     Strong(loc.get("scope_name") or "Scope", cls="locbar-title"),
                     Span(scope_details, cls="locbar-detail")
+                ),
+                Div(cls="locbar-item")(
+                    Strong("DSO Altitude", cls="locbar-title"),
+                    Span(altitude_details, cls="locbar-detail")
                 ),
                 Div(cls="locbar-item")(
                     Strong(loc.get("camera_name") or "Camera", cls="locbar-title"),
@@ -531,6 +543,14 @@ def loc_form(loc: dict) -> FT:
                 cls="loc-section"
             ),
             Fieldset(
+                Legend("DSO Altitude Range"),
+                Div(cls="loc-fields")(
+                    Label("Min Altitude (°)",    Input(name="min_altitude", value=loc.get("min_altitude") or "")),
+                    Label("Max Altitude (°)", Input(name="max_altitude", value=loc.get("max_altitude") or "")),
+                ),
+                cls="loc-section"
+            ),
+            Fieldset(
                 Legend("Camera"),
                 Div(cls="loc-fields")(
                     Label("Camera",       Input(name="camera_name", value=loc.get("camera_name") or "")),
@@ -560,12 +580,12 @@ SCORE_SCALE = ColorScale(
 # using Matplotlib's extensive color mapping
 CS_ALT = MapPlotLibColorScale(
     model = "Greens",
-    vmin=0, vmax=90, 
+    vmin=0, vmax=9, 
 )
 
 HSL_GREEN = HSL_Green_Scale(
     vmin=20, vmax=80,
-    lmin=10, lmax=50
+    lmin=5, lmax=35
 )
 
 # configuration stuff - column names, etc
@@ -897,10 +917,10 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
         default_date=datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d"),
         default_timezone="America/Chicago",
         default_location="Powell Observatory, Kansas", # this should be findable 
-        # default_latitude=38.7076,
-        # default_longitude=-94.7073,
         default_telescope="Astrophysics 130EDF F6.3",
         default_camera="ZWO ASI 2600MC Pro",
+        default_min_altitude=20.0,
+        default_max_altitude=90.0,
     )
     # if loc has specific values for these, override the defaults for the AI agent
     if loc.get("lat") and loc.get("lon"):
@@ -920,6 +940,10 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
         updated_deps.default_elevation = loc["elevation"]
     if loc.get("timezone"):
         updated_deps.default_timezone = loc["timezone"]
+    if loc.get("min_altitude"):
+        updated_deps.default_min_altitude = loc["min_altitude"]
+    if loc.get("max_altitude"):
+        updated_deps.default_max_altitude = loc["max_altitude"]
     
     user_query = loc['ai_text']
 
@@ -940,6 +964,8 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
             loc['date'] = result.output.observer_context.observe_date
             loc['hours_start'] = result.output.observer_context.observe_time 
             loc['timezone'] = result.output.observer_context.timezone
+            loc['min_altitude'] = result.output.observer_context.min_altitude
+            loc['max_altitude'] = result.output.observer_context.max_altitude
             # loc['hours_end'] = result.output.observer_context.hours_end
         if result.output.equipment and result.output.equipment.telescope:
             loc['fl_mm'] = result.output.equipment.telescope.focal_length_mm

@@ -50,6 +50,9 @@ class AstroDependencies:
     # defaults for equipment
     default_telescope: str = "Astrophysics 130EDF F6.3"
     default_camera: str = "ZWO ASI 2600MC Pro"
+    # defaults for DSO alitude range
+    default_min_altitude: float = 20.0  # in degrees, to avoid objects too close to the horizon
+    default_max_altitude: float = 90.0 # can set lower to avoid telescope pointing too high to reach eyepiece
     db_path: str = "./dso_data.db"  # path to local deep space object database
 
 class Camera(BaseModel):
@@ -76,6 +79,8 @@ class ObserverContext(BaseModel):
     observe_time: str | None = Field(default=None, description="The observe time, in local hours as a string e.g. '22:00' or `8PM`. If not available leave as None.")
     #end_time_local: str | None = Field(default=None, description="The local end time in hours of the observation session as a string, e.g. '02:00'. If not available leave as None.")
     timezone: str | None = Field(default=None, description="The timezone of the observation session as a string, e.g., 'America/Chicago'. If not available leave as None.")
+    min_altitude: float | None = Field(default=None, description="The minimum altitude of deep space objects to observe, in degrees. If not available leave as None.")
+    max_altitude: float | None = Field(default=None, description="The maximum altitude of deep space objects to observe, in degrees. If not available leave as None.")
 
 # define a deep space object, which will generally be the focus of an amateur astronomy session
 class DeepSpaceObject(BaseModel):

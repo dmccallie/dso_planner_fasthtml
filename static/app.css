@@ -24,13 +24,13 @@ fieldset { border:1px solid gray; padding:.4rem; border-radius:.3rem; }
   display: flex;
   align-items: flex-start;
   justify-content: flex-start;
-  gap: 1rem;
+  gap: .5rem;
 }
 .locbar-grid {
   flex: 1;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: .75rem;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: .5rem;
 }
 .locbar-item {
   min-width: 0;
