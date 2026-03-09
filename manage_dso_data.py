@@ -348,10 +348,16 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         # add distance for this queries that use distance or n/a
         # format distance to 1 decimal place if it's a number
         distance = dso.get('angular_distance_deg', 'n/a')
-        if isinstance(distance, (int, float)):
+        # try convert to float
+        try:
+            distance = float(distance)
+            # save value for display with 1 decimal place
             dso['distance'] = f"{distance:.1f}"
-        else:
-            dso['distance'] = distance
+            # save value for sorting
+            dso['distance_sort'] = distance
+        except (TypeError, ValueError):
+            dso['distance'] = "n/a"
+            dso['distance_sort'] = float('inf')
         
         # filter by hours_viz
         if 'min_hours_viz' in filters and dso['hours_viz'] < filters['min_hours_viz']:
@@ -364,17 +370,18 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         # skip filter by score
 
     # sort
-    VALID_SORTS = { "name", "catalog", "class", "constellation_abbr", "distance", "type", "hours_viz", "vis_mag", "coverage", "rise_time", "transit_time", "set_time"}
+    VALID_SORTS = { "name", "catalog", "class", "constellation_abbr", "type", "hours_viz", "vis_mag", "coverage", "rise_time", "transit_time", "set_time"}
 
-    if sort_key not in VALID_SORTS:
-        print(f"Invalid sort key {sort_key}, defaulting to 'ra_dd'")
-        sort_key = 'ra_dd' # default sort by RA
     if sort_key == 'rise_time':
         sort_key = 'rise_time_sort' # use sortable version of rise time
-    if sort_key == 'set_time':
+    elif sort_key == 'set_time':
         sort_key = 'set_time_sort' # use sortable version of set time
-    if sort_key == 'transit_time':
+    elif sort_key == 'transit_time':
         sort_key = 'transit_time_sort' # use sortable version of transit time
+    elif sort_key == 'distance':
+        sort_key = 'distance_sort' # use sortable version of distance
+    else:
+        sort_key = 'ra_dd' # default sort by RA
 
     sorted_dso_list = sorted(dso_results, key=lambda x: x[sort_key], reverse=(order=='desc'))
 
@@ -610,7 +617,7 @@ def OLDload_filter_localize_data(db_path: Path,
         raw_data = [item for item in raw_data if item.get('hours_viz') is not None and item['hours_viz'] <= filters['max_hours_viz']]
 
     # sorting
-    VALID_SORTS = { "name", "catalog", "class", "constellation_abbr", "score", "type", "hours_viz", "vis_mag", "coverage", "rise", "transit", "set"}
+    VALID_SORTS = { "name", "catalog", "class", "constellation_abbr",  "type", "hours_viz", "vis_mag", "coverage", "rise", "transit", "set"}
 
     if sort_key not in VALID_SORTS:
         sort_key = 'ra_dd' # default sort by RA
@@ -620,6 +627,8 @@ def OLDload_filter_localize_data(db_path: Path,
         sort_key = 'set_sort' # use sortable version of set time
     if sort_key == 'transit':
         sort_key = 'transit_sort' # use sortable version of transit time
+    if sort_key == 'distance':
+        sort_key = 'distance_sort' # use sortable version of distance
 
     raw_data = sorted(raw_data, key=lambda x: x[sort_key], reverse=(order=='desc'))
 

@@ -1345,6 +1345,7 @@ def detail(req, dso_id: str, localization: dict = {}) -> FT:
 def get_dso_positions(dso_id: str, 
                       lat: float = 38.9, 
                       lon: float = -94.6,
+                      elevation: float = 300,
                       date: Optional[str] = None,
                       tz: str = DEFAULT_TIMEZONE):
     """
@@ -1367,7 +1368,7 @@ def get_dso_positions(dso_id: str,
         raise ValueError("DSO not found")
 
     # FIXME clean this up with less complex routine
-    dso, data_points = calculate_dso_positions(dso_data, lat, lon, obs_date)
+    dso, data_points = calculate_dso_positions(dso_data, lat, lon, elevation, obs_date)
 
     # FIXME with how many hours to show
     observer_hours = {

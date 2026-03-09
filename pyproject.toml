@@ -3,7 +3,7 @@ name = "dso_planner_fasthtml"
 version = "0.1.0"
 description = "Deep Sky Object planner and interactive sky map viewer built with FastHTML and D3.js"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "astronomy-engine>=2.1.19",
     "astroplan>=0.10.1",

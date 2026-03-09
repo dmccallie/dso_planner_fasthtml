@@ -591,7 +591,7 @@ def get_sensor_coverage(dso_min_axis: float, dso_maj_axis: float,
         return 0
 
 # stuff to support D3 charting in detail page
-def calculate_dso_positions(dso:dict, obs_lat, obs_long, obs_date, hours_before=2, hours_after=10):
+def calculate_dso_positions(dso:dict, obs_lat, obs_long, obs_elevation: float, obs_date, hours_before=2, hours_after=10):
     """Calculate positions for a DSO over a night"""
 
     data_points = []
@@ -612,6 +612,7 @@ def calculate_dso_positions(dso:dict, obs_lat, obs_long, obs_date, hours_before=
         dec=dso['dec_dd'],
         observer_lat=obs_lat,
         observer_lon=obs_long,
+        observer_elevation=obs_elevation,
         datetime_list=obs_times
     )
     for i in range(HOURS_TO_SHOW):        
