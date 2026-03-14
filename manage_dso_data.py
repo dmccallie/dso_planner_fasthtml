@@ -44,7 +44,8 @@ def load_localize_filter_expand_sort_dso_data(session_id: str, db_path: Path, fi
     dso_list = get_localized_dso_data(session_id, db_path, localization['sql_query'], localization['lat'], localization['lon'],
                                       localization['elevation'], localization['date'], localization['hours_start'], user_timezone)
     
-    print(f"dso list returns from get_localized_dso_data {[('name', row['name'], 'altitude', row['altitude']) for row in dso_list]}")
+    # print(f"dso list returns from get_localized_dso_data {[('name', row['name'], 'altitude', row['altitude']) for row in dso_list]}")
+    print(f"Fetched {len(dso_list)} localized DSO records for session {session_id} from database")
 
     #expand dso_data and apply dynamic filtering and sorting based on filters and sort_key
     dso_list = expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list, localization, filters, sort_key, order)
@@ -214,6 +215,8 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
     # we may skip rows to save time, so build a new list of results rather than modifying in place
     dso_results = []
 
+    print(f"Expand dso data and apply dynamic filters and sorting to {len(dso_list)} localized DSO records for session with localization {localization} and filters {filters}")
+
     # precompute sensor size in arcmin if we have the needed localization params, since it's used in the loop
     if localization.get('fl_mm', None) is not None and \
         localization.get('px_um', 0.0) != 0.0 and \
@@ -230,6 +233,14 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
 
     for dso in dso_list:
         
+        # since we have used normalize_loc, we can test min/max altitude directly here without worrying about missing localization values, since they will be normalized to defaults if not provided
+        if 'min_altitude' in localization and dso['altitude'] is not None and \
+            dso['altitude'] < localization['min_altitude']:
+            continue
+        if 'max_altitude' in localization and dso['altitude'] is not None and \
+            dso['altitude'] > localization['max_altitude']:
+            continue
+
         # filter by name match (field 'q' in filters) if provided
         # FIXME make this more robust like a fuzzy match
         if 'q' in filters and filters['q'].strip() != "":
@@ -257,6 +268,11 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         
         # add score field for sorting and filtering (random for now)
         dso['score'] = int(100 * random()) # random int from 0 to 100 for now
+
+        # add display value of ra in hours and minutes, for display only, keep ra_dd for sorting
+        ra_hours = int(dso['ra_dd'] / 15)
+        ra_minutes = int((dso['ra_dd'] / 15 - ra_hours) * 60)
+        dso['RA'] = f"{ra_hours}h {ra_minutes}m"
 
         # fix up rise set transit times to be localized strings for display, and sortable strings for sorting
         # FIXME consider move to Td display logic
@@ -387,252 +403,6 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
 
     return sorted_dso_list
 
-
-# This is the OLD pre-ai code - save for reference
-def OLDload_filter_localize_data(db_path: Path, 
-    filters:dict, localization:dict,
-    sort_key:str, order:str) -> list[dict]:
-    # since we have no state between calls, just load all data each time
-    # with larger db we could cache some of this in redis or similar
-    
-    # filters is dict with optional keys:
-    #   name (str, substring match, case insensitive)
-    #   class (list of str, e.g. ['Galaxy', 'Nebula'])
-    #   constellation_abbr (list of str, e.g. ['Ori', 'And'])
-    #   min_mag (float)
-    #   max_mag (float)
-    #   min_size (float, arcmin)
-    #   max_size (float, arcmin)
-    #   min_score (float)
-    #   max_score (float)
-    #   min_hours_viz (float)
-    #   max_hours_viz (float)
-    # localization is dict with keys:
-    #   lat (float, degrees)
-    #   lon (float, degrees)
-    #   elevation (float, meters)
-    #   timezone (str, e.g. 'US/Eastern')
-    #   date (str, 'YYYY-MM-DD')
-    # sort_key is one of the sortable fields in the final data dict
-    # order is 'asc' or 'desc'
-    # returns list of dicts with all fields from dso table plus:
-    #   Coverage (float, percent of sensor's field of view covered by object)
-    #   Rise_time (str, localized rise time, e.g. '20:30')
-    #   Transit_time (str, localized transit time, e.g. '23:15')
-    #   Set_time (str, localized set time, e.g. '02:00')
-    #   Score (float, computed score based on visibility, mag, size, etc.)
-    #   HoursViz (float, hours usefully visible)
-    #   ObsTime1 (datetime, date/time for observation 1)
-    #   ObsTime2 (datetime, date/time for observation 2)
-    #   ObsTime3 (datetime, date/time for observation 3)
-    #   ObsTime4 (datetime, date/time for observation 4)
-    #   ObsTime5 (datetime, date/time for observation 5)
-
-    # db_path is path to sqlite db created by load_stellarium_data_to_sqlite
-
-    # first get all raw data that can be filtered without localization
-    print("load_dso_subset Localization parameters:", localization)
-    print("load_dso_subset Filter parameters:", filters)
-
-    raw_data = load_dso_subset(
-        db_path,
-        name=filters.get('q',''),
-        cls=filters.get('classes',['all']),
-        constellation_abbrev=filters.get('constellation',["all"]),
-        object_types=filters.get('object_types',["all"])
-    )
-
-    # then apply localization to the raw data
-    # for testing, let's just add the new fields to each dict
-
-
-    lat = localization.get('lat', 38.76918)
-    lon = localization.get('lon', -94.65635)
-    elev = localization.get('elevation', 330.0)
-    start_date_str = localization.get('date', None)
-    
-    if start_date_str is None:
-        start_date = datetime.now(tz=ZoneInfo("America/Chicago"))
-    else:
-        start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-        start_date = start_date.replace(tzinfo=ZoneInfo("America/Chicago"))
-    
-    # for now, assume tz=ZoneInfo("America/Chicago")
-    # FIXME - use localization timezone
-    
-    # next calc rise/transit/set, for each object
-    # more efficient to do all at once
-
-    # get rise/transit/set times for the given date and location
-    # use beginning of the day
-    # cache the data if date is same
-    # day_start = datetime.now(tz=ZoneInfo("America/Chicago")). \
-    #     replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # we @cache the function, so convert list to tuple for hashability
-    radec_items = tuple( (item['ra_dd'], item['dec_dd']) for item in raw_data )
-    rts = calculate_rise_transit_set_fast(
-        ra_dec_list=radec_items,
-        observer_lat=lat,
-        observer_lon=lon,
-        elevation_meters=elev,
-        reference_date=start_date,
-    )
-
-    # and assign to each item
-    # fix me move this to Td function
-    for i, item in enumerate(raw_data):
-        rt = rts[i]['rise_time']
-        if isinstance(rt, datetime):
-            # convert to localized string
-            # should use localization timezone
-            # for now, assume tz=ZoneInfo("America/Chicago")
-            rt = rt.astimezone(tz=ZoneInfo("America/Chicago"))
-            # format as 24hr time, no date
-            item['rise_time'] = rt.strftime("%H:%M")
-            item['rise_time_sort'] = rt.strftime("%Y-%m-%d %H:%M")
-            # item['rise'] = rt.strftime("%d %b %Y <br> %I:%M %p")
-        else:
-            item['rise_time'] = rt
-            item['rise_time_sort'] = ""
-
-        rt = rts[i]['transit_time']
-        if isinstance(rt, datetime):
-            rt = rt.astimezone(tz=ZoneInfo("America/Chicago"))
-            item['transit_time'] = rt.strftime("%H:%M")
-            item['transit_time_sort'] = rt.strftime("%Y-%m-%d %H:%M")
-        else:
-            item['transit_time'] = rt
-            item['transit_time_sort'] = ""
-
-        rt = rts[i]['set_time']
-        if isinstance(rt, datetime):
-            rt = rt.astimezone(tz=ZoneInfo("America/Chicago"))
-            item['set_time'] = rt.strftime("%H:%M")
-            item['set_time_sort'] = rt.strftime("%Y-%m-%d %H:%M")
-        else:
-            item['set_time'] = rt
-            item['set_time_sort'] = ""
-
-    # find astro twilight time for the date - our first obs time
-    # this is @cache so only computed once per date / location
-    dark_times = find_all_twilight_times(
-        observer_lat=lat,
-        observer_lon=lon,
-        reference_date=start_date,
-        elevation_meters=elev
-    )
-
-    print("Dark times found:", dark_times)
-
-    # lets use astro dark end time as first obs time
-    # but round "back" to the prior hour
-    if dark_times['astronomical_evening'] is None:
-        # no astro twilight, use 21:00 local time
-        print("No astro twilight end time found, using 21:00")
-        start_obs_time = datetime.combine(start_date, time(21,0,0)).replace(tzinfo=ZoneInfo("America/Chicago"))
-    else:
-        start_obs_time = dark_times['astronomical_evening']
-        start_obs_time = start_obs_time.replace(minute=0, second=0, microsecond=0)    
-
-    for item in raw_data:
-        item['score'] = int(100 * random()) # random int from 0 to 100 for now
-
-        # add 5 observations with alt/az/airmass for each object
-        # make sure start_date is using local timezone
-
-        # start_obs_time = datetime.combine(start_date, time(21,0,0)).replace(tzinfo=ZoneInfo("America/Chicago"))
-        # start_obs_time = start_date
-        # start_obs_time = datetime.now(tz=ZoneInfo("America/Chicago")) # should use localization timezone
-        obs_times = [start_obs_time + timedelta(hours=i) for i in range(0, 6)]
-
-        results = ra_dec_to_altaz_airmass_multiple_times(
-            ra=item['ra_dd'],
-            dec=item['dec_dd'],
-            observer_lat=lat,
-            observer_lon=lon,
-            datetime_list=obs_times
-        )
-
-        number_hours_viz = 0 # how many times is airmass < 3.0
-        for i in range(0, 6):
-            res = results[i]
-            # add the actual time for each obs, for column header
-            # FIXME should be normalized into a dict of these observations
-            item[f'obsTime{i}_dt'] = obs_times[i]
-            if res is None:
-                item[f'obsTime{i}'] = "---/---<br>---"
-                item[f'obsTime{i}_alt'] = -90.0
-            else:
-                alt, az, airmass = res['altitude'], res['azimuth'], res['airmass']
-                item[f'obsTime{i}'] = f"{alt:.0f}\u00B0/{az:.0f}\u00B0<br>{airmass:.1f}"
-                item[f'obsTime{i}_alt'] = alt # used to drive color scale
-                if airmass is not None and isinstance(airmass, float) and airmass <= MIN_AIRMASS:
-                    number_hours_viz += 1
-    
-        item['hours_viz'] = number_hours_viz
-
-        # now compute coverage based on size
-        if localization.get('fl_mm', None) is not None and \
-           localization.get('px_um', 0.0) != 0.0 and \
-           localization.get('rows', 0) != 0 and \
-           localization.get('cols', 0) != 0 and \
-           item.get('maj_axis', None) is not None:  # only must have major axis
-
-            # compute pixel scale in arcsec/pixel
-            fl_mm = localization['fl_mm']
-            px_um = localization['px_um']
-            fov_width_px = localization['cols']
-            fov_height_px = localization['rows']
-            width_amin, height_amin = calculate_sensor_fov_amin(fl_mm, px_um,fov_width_px, fov_height_px)
-
-            dso_maj_axis = item['maj_axis'] # arcmin
-            dso_min_axis = item['min_axis']
-
-            sens_cov = get_sensor_coverage(dso_min_axis, dso_maj_axis, width_amin, height_amin)
-
-            item['coverage'] = int(sens_cov) # already in percent (0.0-100.0)
-        else:
-            item['coverage'] = 0
-
-    # finally apply subseleting filters
-    # if 'min_mag' in filters:
-    #     raw_data = [item for item in raw_data if item.get('vis_mag') is not None and item['vis_mag'] <= filters['min_mag']]
-    # if 'max_mag' in filters:
-    #     raw_data = [item for item in raw_data if item.get('vis_mag') is not None and item['vis_mag'] >= filters['max_mag']]
-    if 'min_coverage' in filters:
-        raw_data = [item for item in raw_data if item.get('coverage') is not None and item['coverage'] >= filters['min_coverage']]
-    if 'max_coverage' in filters:
-        raw_data = [item for item in raw_data if item.get('coverage') is not None and item['coverage'] <= filters['max_coverage']]
-    # hack test using hours_viz as score
-    # if 'min_hours_viz' in filters:
-    #     raw_data = [item for item in raw_data if item.get('hours_viz') is not None and item['hours_viz'] >= filters['min_score']]
-    if 'max_score' in filters:
-        raw_data = [item for item in raw_data if item.get('score') is not None and item['score'] <= filters['max_score']]
-    if 'min_hours_viz' in filters:
-        raw_data = [item for item in raw_data if item.get('hours_viz') is not None and item['hours_viz'] >= filters['min_hours_viz']]
-    # if 'max_hours_viz' in filters:
-    #     raw_data = [item for item in raw_data if item.get('hours_viz') is not None and item['hours_viz'] <= filters['max_hours_viz']]
-    if 'max_hours_viz' in filters:
-        raw_data = [item for item in raw_data if item.get('hours_viz') is not None and item['hours_viz'] <= filters['max_hours_viz']]
-
-    # sorting
-    VALID_SORTS = { "name", "catalog", "class", "constellation_abbr",  "type", "hours_viz", "vis_mag", "coverage", "rise", "transit", "set"}
-
-    if sort_key not in VALID_SORTS:
-        sort_key = 'ra_dd' # default sort by RA
-    if sort_key == 'rise':
-        sort_key = 'rise_sort' # use sortable version of rise time
-    if sort_key == 'set':
-        sort_key = 'set_sort' # use sortable version of set time
-    if sort_key == 'transit':
-        sort_key = 'transit_sort' # use sortable version of transit time
-    if sort_key == 'distance':
-        sort_key = 'distance_sort' # use sortable version of distance
-
-    raw_data = sorted(raw_data, key=lambda x: x[sort_key], reverse=(order=='desc'))
-
-    return raw_data
 
 def load_dso_by_id(dso_id: str, db_path: Path) -> Optional[dict]:
     # using db from load_stellarium_data_to_sqlite.py

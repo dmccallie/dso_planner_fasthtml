@@ -692,7 +692,7 @@ def moon_illumination_percent(dt_aware: datetime) -> float:
 
     return frac * 100.0
 
-def get_data_for_dso_moon_chart(dso:dict, obs_lat, obs_long, obs_date, sample_hour = 21,
+def get_data_for_dso_moon_chart(dso:dict, obs_lat, obs_long, obs_elevation,obs_date, sample_hour = 21,
                  tz=DEFAULT_TIMEZONE) -> dict[str, list[dict[str, Union[str, float]]]]:
     # return one year's worth of alt/az for the DSO and in parallel, the degree of 
     # moon illumination for the same sample dates.
@@ -733,6 +733,7 @@ def get_data_for_dso_moon_chart(dso:dict, obs_lat, obs_long, obs_date, sample_ho
         dec=dso['dec_dd'],
         observer_lat=obs_lat,
         observer_lon=obs_long,
+        observer_elevation=obs_elevation,
         datetime_list=sample_datetimes
     )
     

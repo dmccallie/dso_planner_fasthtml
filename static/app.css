@@ -1,3 +1,8 @@
+/* some overrides */
+:root {
+  --pico-line-height: 1.1; 
+}
+
 /* Layout */
 .container { display:flex; flex-direction:column; gap:1rem; }
 .grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:.75rem; }

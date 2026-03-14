@@ -289,6 +289,24 @@ def normalize_loc(loc: dict) -> dict:
     except (TypeError, ValueError):
         loc['cols'] = 0
 
+    # make sure min/max altitude are floats and within reasonable bounds (0 to 90)
+    try:
+        min_alt = float(loc.get('min_altitude'))
+        if 0 <= min_alt <= 90:
+            loc['min_altitude'] = min_alt
+        else:
+            loc['min_altitude'] = 20.0  # default min altitude
+    except (TypeError, ValueError):
+        loc['min_altitude'] = 20.0
+    try:        
+        max_alt = float(loc.get('max_altitude'))
+        if 0 <= max_alt <= 90:
+            loc['max_altitude'] = max_alt
+        else:
+            loc['max_altitude'] = 90.0  # default max altitude
+    except (TypeError, ValueError):
+        loc['max_altitude'] = 90.0  
+    # print(f"Normalized loc resulted in: {loc}")
     return loc
 
 def get_loc(req, response: Response | None = None) -> dict:
@@ -661,6 +679,16 @@ def altAzi_Td(col: ColumnConfig, row: dict) -> FT:
 
     return Td(Safe(val), **attrs)
 
+def nameCatTd(col: ColumnConfig, row: dict) -> FT:
+    """Custom TD for name/catalog that puts the catalog in smaller text below the name."""
+    name = row.get("name") or "Unknown"
+    cat  = row.get("catalog") or ""
+    content = [name]
+    if cat:
+        content.append(Br())
+        content.append(Small(cat, cls="catalog"))
+    return Td(*content, style=col.style, cls=col.cls)
+
 @dataclass
 class ColumnConfig:
     name: str  # the index/key in the data dict
@@ -697,13 +725,18 @@ COL_FIGS: list[ColumnConfig]= [
     #     renderTd_fn = lambda col, row: default_Td(col, row)
     # ),
 
-    ColumnConfig(name = "name", width = "14%", style=None, hdr_cls="wrap", cls="wrap", sortable=True, color_scale=None,
+    ColumnConfig(name = "name", width = "16%", style=None, hdr_cls="wrap", cls="wrap", sortable=True, color_scale=None,
         header_fn = lambda col, row: "Name",
-        renderTd_fn = lambda col, row: default_Td(col, row)
+        renderTd_fn = lambda col, row: nameCatTd(col, row)
     ),
 
-    ColumnConfig(name = "catalog", width = "5%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
-        header_fn = lambda col, row: "Cat",
+    # ColumnConfig(name = "catalog", width = "5%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+    #     header_fn = lambda col, row: "Cat",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
+
+    ColumnConfig(name = "RA", width = "6%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "RA",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
@@ -956,6 +989,7 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
     
     if isinstance(result.output, SA_Plan):
         # update loc with new info from plan
+        print(f"AI Agent returned plan: {result.output}")
         if result.output.observer_context:
             loc['site_name'] = result.output.observer_context.location
             loc['lat'] = result.output.observer_context.latitude_deg
@@ -1079,10 +1113,10 @@ async def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
 
         Dialog(id="loc-dialog", cls="modal")(
             Div(cls="layout")(
-                H2("Change localization"),
+                H2("Specify your observing plan..."),
                 Div("Loading...", cls="body", id="loc-dialog-body"),
                 Div(cls="footer")(
-                    Button("Save", type="submit", form="loc-form", id="save-loc"),
+                    Button("Execute Plan", type="submit", form="loc-form", id="save-loc"),
                     Form(method="dialog")(Button("Cancel"))
                 )
             )
@@ -1389,7 +1423,7 @@ def get_dso_positions(dso_id: str,
     }
 
 @rt('/api/dso-moon-chart-data/{dso_id}/localization')
-def get_dso_moon_chart_data(dso_id: str, lat: float, lon: float, date: str, tz: str):
+def get_dso_moon_chart_data(dso_id: str, lat: float, lon: float, elevation: float, date: str, tz: str):
     """
     API endpoint that returns JSON data for the DSO moon chart
     """
@@ -1408,7 +1442,7 @@ def get_dso_moon_chart_data(dso_id: str, lat: float, lon: float, date: str, tz: 
         obs_date = datetime.now(ZoneInfo(tz))
 
     # Fetch DSO and moon sample data for 9pm local time
-    dso_moon_data = get_data_for_dso_moon_chart(dso_data, lat, lon, obs_date,
+    dso_moon_data = get_data_for_dso_moon_chart(dso_data, lat, lon, elevation, obs_date,
                                                 sample_hour=21, tz=tz)
     if not dso_moon_data:
         raise ValueError("DSO moon data not found")
