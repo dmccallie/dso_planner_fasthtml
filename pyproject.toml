@@ -6,8 +6,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "astronomy-engine>=2.1.19",
-    "astroplan>=0.10.1",
-    "astropy>=6.1.7",
     "faker>=37.6.0",
     "geopy>=2.4.1",
     "matplotlib>=3.10.6",

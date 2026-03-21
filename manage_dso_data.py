@@ -13,8 +13,6 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from astronomy_utils import ai_localize_dso, calculate_pixel_scale, calculate_rise_transit_set_fast, calculate_sensor_fov_amin, find_all_twilight_times, get_sensor_coverage, ra_dec_to_altaz_airmass_multiple_times
-from astropy import units as u
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz
 
 from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR
 

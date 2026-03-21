@@ -361,44 +361,44 @@ def _merge_loc(base: dict, mapping) -> dict:
 def normalize_loc(loc: dict) -> dict:
     # make sure lat and long are floats
     try:
-        loc['lat'] = float(loc.get('lat'))
+        loc['lat'] = float(loc.get('lat')) # type: ignore
     except (TypeError, ValueError):
         loc['lat'] = 38.76918  # powell
     try:
-        loc['lon'] = float(loc.get('lon'))
+        loc['lon'] = float(loc.get('lon')) # type: ignore
     except (TypeError, ValueError):
         loc['lon'] = -94.65635  # powell
 
     # date is ISO format YYYY-MM-DD
     try:
-        date.fromisoformat(loc.get('date'))
+        date.fromisoformat(loc.get('date')) # type: ignore
     except (TypeError, ValueError):
         loc['date'] = date.today().isoformat()
 
     # also fl_mm, rows, cols as int
     try:
-        loc['fl_mm'] = int(loc.get('fl_mm'))
+        loc['fl_mm'] = int(loc.get('fl_mm')) # type: ignore
     except (TypeError, ValueError):
         loc['fl_mm'] = 0
 
     try:
-        loc['px_um'] = float(loc.get('px_um'))
+        loc['px_um'] = float(loc.get('px_um')) # type: ignore
     except (TypeError, ValueError):
         loc['px_um'] = 0.0  # default pixel size
 
     try:
-        loc['rows'] = int(loc.get('rows'))
+        loc['rows'] = int(loc.get('rows')) # type: ignore
     except (TypeError, ValueError):
         loc['rows'] = 0
 
     try:
-        loc['cols'] = int(loc.get('cols'))
+        loc['cols'] = int(loc.get('cols')) # type: ignore
     except (TypeError, ValueError):
         loc['cols'] = 0
 
     # make sure min/max altitude are floats and within reasonable bounds (0 to 90)
     try:
-        min_alt = float(loc.get('min_altitude'))
+        min_alt = float(loc.get('min_altitude')) # type: ignore
         if 0 <= min_alt <= 90:
             loc['min_altitude'] = min_alt
         else:
@@ -406,7 +406,7 @@ def normalize_loc(loc: dict) -> dict:
     except (TypeError, ValueError):
         loc['min_altitude'] = 20.0
     try:        
-        max_alt = float(loc.get('max_altitude'))
+        max_alt = float(loc.get('max_altitude')) # type: ignore
         if 0 <= max_alt <= 90:
             loc['max_altitude'] = max_alt
         else:
@@ -485,12 +485,12 @@ def localization_bar(loc: dict, oob=False) -> FT:
 
     hours_start = loc.get("hours_start")
     timezone = loc.get("timezone")
-    fl_mm = loc.get("fl_mm")
-    rows = int(loc.get("rows")) or 0
-    cols = int(loc.get("cols")) or 0
-    px_um = float(loc.get("px_um")) or 0.0
-    min_altitude = loc.get("min_altitude") or 20.0
-    max_altitude = loc.get("max_altitude") or 90.0
+    fl_mm = float(loc.get("fl_mm") or 0.0) 
+    rows = int(loc.get("rows") or 0)
+    cols = int(loc.get("cols") or 0)
+    px_um = float(loc.get("px_um") or 0.0)
+    min_altitude = float(loc.get("min_altitude") or 20.0)
+    max_altitude = float(loc.get("max_altitude") or 90.0)
 
     lat_lon_elev = f"{lat}, {lon}, {elevation}m"
     date_time_details = f"{hours_start}, {timezone}"

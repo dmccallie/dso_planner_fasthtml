@@ -1,12 +1,8 @@
-# astronomy routines using astropy, etc
+# astronomy routines
 
 from functools import cache
 from pathlib import Path
 from time import perf_counter
-
-from astropy import units as u
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz
-from astropy.time import Time
 
 import astronomy as astro  # Astronomy Engine
 
@@ -51,34 +47,34 @@ stellarium_object_types = [
 # returns list of SkyCoord objects in AltAz frame
 # datetimes MUST have desired timezone info set
 # this was astropy, but was too slow, so see astronomy engine code below
-def altaz_from_lat_long_times(
-    ra_deg: float,
-    dec_deg: float,
-    latitude: float,
-    longitude: float,
-    local_dt: list[datetime],
-    elevation_m: float = 0.0,
-    pressure_hPa: Optional[float] = 1013.25,  # None disables refraction
-    temperature_C: float = 10.0,
-    relative_humidity: float = 0.5,
-    obs_wavelength_um: float = 0.55,
-) -> Union[SkyCoord, list[SkyCoord]]:
+# def altaz_from_lat_long_times(
+#     ra_deg: float,
+#     dec_deg: float,
+#     latitude: float,
+#     longitude: float,
+#     local_dt: list[datetime],
+#     elevation_m: float = 0.0,
+#     pressure_hPa: Optional[float] = 1013.25,  # None disables refraction
+#     temperature_C: float = 10.0,
+#     relative_humidity: float = 0.5,
+#     obs_wavelength_um: float = 0.55,
+# ) -> Union[SkyCoord, list[SkyCoord]]:
 
-    location = EarthLocation(lat=latitude * u.deg,
-                             lon=longitude * u.deg,
-                             height=elevation_m * u.m)
+#     location = EarthLocation(lat=latitude * u.deg,
+#                              lon=longitude * u.deg,
+#                              height=elevation_m * u.m)
 
-    pressure = 0 * u.hPa if pressure_hPa is None else pressure_hPa * u.hPa
-    frame = AltAz(obstime=local_dt,
-                  location=location,
-                  pressure=pressure,
-                  temperature=temperature_C * u.deg_C,
-                  relative_humidity=relative_humidity,
-                  obswl=obs_wavelength_um * u.um)
+#     pressure = 0 * u.hPa if pressure_hPa is None else pressure_hPa * u.hPa
+#     frame = AltAz(obstime=local_dt,
+#                   location=location,
+#                   pressure=pressure,
+#                   temperature=temperature_C * u.deg_C,
+#                   relative_humidity=relative_humidity,
+#                   obswl=obs_wavelength_um * u.um)
 
-    target = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
-    skList = target.transform_to(frame)
-    return skList
+#     target = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
+#     skList = target.transform_to(frame)
+#     return skList
 
 def datetime_to_astronomy_time(dt: datetime) -> float:
     """
