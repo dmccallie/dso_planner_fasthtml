@@ -21,6 +21,7 @@ export async function initDSOMoonChartFromAPI(containerId, dsoId, params = {}) {
     const queryParams = new URLSearchParams({
         lat: params.lat || 38.9,
         lon: params.lon || -94.6,
+        elevation: params.elevation || 300,
         date: params.date || new Date().toISOString().split('T')[0],
         tz: params.tz || 'America/Chicago',
     });

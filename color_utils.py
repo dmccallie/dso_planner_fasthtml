@@ -1,5 +1,6 @@
 
 from typing import Iterable, Sequence, Tuple
+import colorsys
 
 # ------------------------ Color scale utilities ------------------------------
 # Lightweight replacement for JS `color-scales` (3+ stops, gamma bias, sRGB/linear)
@@ -109,7 +110,7 @@ def best_text_color(rgb01: tuple[float,float,float]) -> str:
     L = 0.2126*r + 0.7152*g + 0.0722*b
     return "#000" if L > 0.5 else "#fff"
 
-# Example scale similar to your JS snippet
+# Example scale similar to old JS snippet
 SCORE_SCALE = ColorScale(
     vmin=0, vmax=100,
     colors=["#a50026", "#ffff00", "#1a9850"],
@@ -125,13 +126,43 @@ class MapPlotLibColorScale:
         self.cmap = cm.get_cmap(model)
         self.norm = colors.Normalize(vmin=float(vmin), vmax=float(vmax))
 
-    def as_css_rgba(self, alt):
+    def as_css(self, alt):
         r,g,b,a = self.cmap(self.norm(alt))
         return f"rgba({int(r*255)},{int(g*255)},{int(b*255)},{a:.3f})"
     
     def as_rgb_tuple(self, alt):
         r,g,b,a = self.cmap(self.norm(alt))
         return (r,g,b)
+
+# experiment green scale for altitudes, using HSL with fixed hue/sat and lightness based on altitude
+# vmin and vmax are the altitude range for the scale, lmin and lmax are the lightness range for the scale
+class HSL_Green_Scale:
+    def __init__(self, vmin=20, vmax=90, lmin=15, lmax=50):
+        self.vmin = float(vmin)
+        self.vmax = float(vmax)
+        self.lmin = float(lmin)
+        self.lmax = float(lmax)
+
+    def _hsl_components(self, value: float) -> tuple[float, float, float]:
+        hue = 120.0
+        saturation = 100.0
+        if value <= self.vmin:
+            lightness = 0.0 # clip to black below vmin
+        elif value >= self.vmax:
+            lightness = self.lmax
+        else:
+            t = (value - self.vmin) / (self.vmax - self.vmin) if self.vmax > self.vmin else 0.5
+            lightness = self.lmin + t * (self.lmax - self.lmin)
+        return (hue, saturation, lightness)
+
+    def as_css(self, alt):
+        hue, saturation, lightness = self._hsl_components(float(alt))
+        return f"hsl({hue:.0f}, {saturation:.0f}%, {lightness:.1f}%)"
+    
+    def as_rgb_tuple(self, alt):
+        hue, saturation, lightness = self._hsl_components(float(alt))
+        rgb = colorsys.hls_to_rgb(hue / 360.0, lightness / 100.0, saturation / 100.0)
+        return rgb
 
 
 

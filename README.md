@@ -15,7 +15,7 @@ THIS IS INCOMPLETE TESTING CODE - DOES NOT REALLY WORK YET!
 
 - **Backend**: FastHTML (Python web framework)
 - **Frontend**: HTMX, D3.js for interactive visualizations
-- **Astronomy**: Astropy, AstroPlan, Astronomy Engine for calculations
+- **Astronomy**: AstroPlan, Astronomy Engine for calculations
 - **Database**: SQLite for DSO data storage
 
 ## Installation

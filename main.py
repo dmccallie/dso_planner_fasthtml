@@ -6,32 +6,174 @@ FastHTML + HTMX starter: filters + sortable table + **row-based infinite scroll*
 from __future__ import annotations
 import datetime
 from datetime import datetime, timedelta, time
+import sqlite3
+import secrets
 from zoneinfo import ZoneInfo
 import random
 from datetime import date, timedelta
 from time import perf_counter
-from typing import Callable, Any
-import urllib.parse
+from typing import Callable, Any, Sequence
 import json
+from io import BytesIO
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request as UrlRequest, urlopen as urllib_urlopen
 from faker import Faker
 from fasthtml.common import *
+from PIL import Image
 
+import asyncio
+
+from prompt_toolkit import HTML
 from starlette.staticfiles import StaticFiles
+from starlette.responses import Response
 
 
-from color_utils import ColorScale, best_text_color, MapPlotLibColorScale
+from ai_data_models import AstroDependencies, DSOInfoQuery, SA_Plan, DSOInfo
+from color_utils import ColorScale, HSL_Green_Scale, best_text_color, MapPlotLibColorScale
 
 from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_dso_positions, get_data_for_dso_moon_chart, \
     stellarium_object_types, DEFAULT_TIMEZONE
 
 # our data access layer
 from manage_dso_data import get_unique_constellations, load_dso_by_id, load_dso_subset, get_unique_classes, \
-        load_filter_localize_data
+        get_localized_dso_data, load_localize_filter_expand_sort_dso_data
+
+from agents import single_agent_astro_plan, dso_info_agent
+
+# set up some stuff for pydantic-ai and logfire
+# fetch openai api key from env file
+import dotenv
+dotenv.load_dotenv()
+
+# import logfire if in debug
+DEBUG = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes"}
+if DEBUG:
+    # logfire notes:
+    # Your Logfire credentials are stored in /home/david/.logfire/default.toml
+    # setup using logfire-cli via uv
+    # uv add logfire
+    # uv run logfire auth
+    # uv run logfire projects use astro-planner-project
+    #  https://logfire-us.pydantic.dev/dmccallie/astro-planner-project
+    import logfire
+
+    logfire.configure()
+    logfire.instrument_pydantic_ai()
+    # logfire.instrument_httpx(capture_all=True)
 
 # ----------------------------- App setup -------------------------------------
 app, rt = fast_app()
 # add a static files mount for CSS, JS, images, etc
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+WIKIPEDIA_USER_AGENT = "dso_planner_fasthtml/0.1 (Wikipedia image lookup)"
+
+# ensure that every request has a session ID cookie, and that the session state is loaded/saved around the request
+# does this have performance implications? should we only do it for certain routes? for now just do it for everything except static files
+@app.middleware("http")
+async def ensure_session_middleware(req, call_next):
+    response = await call_next(req)
+    if req.url.path.startswith("/static/"):
+        return response
+    ensure_session_id(req, response)
+    return response
+
+
+def _dedupe_strings(values: Sequence[str | None]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(cleaned)
+    return result
+
+
+def _fetch_wikipedia_json(params: dict[str, str]) -> dict[str, Any] | None:
+    request = UrlRequest(
+        f"{WIKIPEDIA_API_URL}?{urlencode(params)}",
+        headers={
+            "User-Agent": WIKIPEDIA_USER_AGENT,
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib_urlopen(request, timeout=10) as response:
+            return json.load(response)
+    except Exception as exc:
+        print(f"Wikipedia API request failed: {exc}")
+        return None
+
+
+def _lookup_wikipedia_image(candidates: Sequence[str | None]) -> dict[str, str] | None:
+    for candidate in _dedupe_strings(candidates):
+        payload = _fetch_wikipedia_json({
+            "action": "query",
+            "format": "json",
+            "generator": "search",
+            "gsrsearch": candidate,
+            "gsrlimit": "1",
+            "prop": "pageimages|info",
+            "piprop": "original|thumbnail|name",
+            "pithumbsize": "1200",
+            "inprop": "url",
+        })
+        if not payload:
+            continue
+
+        pages = payload.get("query", {}).get("pages", {})
+        for page in pages.values():
+            image = page.get("original") or page.get("thumbnail") or {}
+            image_url = image.get("source")
+            page_url = page.get("fullurl")
+            title = page.get("title")
+            if image_url and page_url and title:
+                return {
+                    "image_url": image_url,
+                    "page_url": page_url,
+                    "title": title,
+                }
+    return None
+
+
+def _is_allowed_wiki_image_url(image_url: str) -> bool:
+    parsed = urlparse(image_url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = (parsed.netloc or "").lower()
+    return host.endswith("wikimedia.org") or host.endswith("wikipedia.org")
+
+
+def _fetch_remote_bytes(image_url: str) -> tuple[bytes, str | None]:
+    request = UrlRequest(
+        image_url,
+        headers={
+            "User-Agent": WIKIPEDIA_USER_AGENT,
+            "Accept": "image/*,*/*;q=0.8",
+        },
+    )
+    with urllib_urlopen(request, timeout=20) as response:
+        content_type = response.headers.get_content_type()
+        return response.read(), content_type
+
+
+def _convert_image_bytes_if_needed(image_url: str, image_bytes: bytes, content_type: str | None) -> tuple[bytes, str]:
+    lowered_path = urlparse(image_url).path.lower()
+    is_tiff = lowered_path.endswith((".tif", ".tiff")) or content_type in {"image/tiff", "image/tif"}
+    if not is_tiff:
+        return image_bytes, content_type or "image/jpeg"
+
+    with Image.open(BytesIO(image_bytes)) as image:
+        converted = image.convert("RGB")
+        output = BytesIO()
+        converted.save(output, format="JPEG", quality=75)
+    return output.getvalue(), "image/jpeg"
 
 # # -------------------------- Fake dataset -------------------------------------
 # SEED          = 42
@@ -43,16 +185,122 @@ MAX_HOURS_VISIBLE = 6  # max for hours visible filter FIXME for whole night?
 
 db_path = Path("./dso_data.db")
 
-dso_classes = get_unique_classes(db_path=db_path)
-print(f"Unique DSO classes: {dso_classes}")
-# gets pairs of (abbr, full name)
-dso_constellation_name_pairs = [("all", "All Constellations")] + get_unique_constellations(db_path=db_path)
-print(f"Unique DSO constellation abbreviations: {dso_constellation_name_pairs}")
+SESSION_COOKIE_NAME = "astro_session_id"
+SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 
+def _session_db():
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
+def ensure_session_table() -> None:
+    with _session_db() as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_state (
+                session_id TEXT PRIMARY KEY,
+                data_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+def load_session_state(session_id: str | None) -> dict:
+    if not session_id:
+        return {}
+    with _session_db() as conn:
+        row = conn.execute(
+            "SELECT data_json FROM session_state WHERE session_id = ?",
+            (session_id,)
+        ).fetchone()
+    if not row:
+        return {}
+    try:
+        return json.loads(row["data_json"])
+    except json.JSONDecodeError:
+        return {}
+
+def save_session_state(session_id: str | None, data: dict) -> None:
+    if not session_id:
+        return
+    payload = json.dumps(data)
+    updated_at = datetime.utcnow().isoformat()
+    with _session_db() as conn:
+        # the ON CONFLICT clause allows us to do an upsert: insert a new row if the session_id doesn't exist, or update the existing row if it does
+        conn.execute(
+            """
+            INSERT INTO session_state (session_id, data_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                data_json = excluded.data_json,
+                updated_at = excluded.updated_at
+            """,
+            (session_id, payload, updated_at)
+        )
+
+def get_session_id(req) -> str | None:
+    return req.cookies.get(SESSION_COOKIE_NAME)
+
+def ensure_session_id(req, response: Response | None = None) -> str | None:
+    session_id = get_session_id(req)
+    if session_id:
+        return session_id
+
+    # If a session was already created earlier in this request, reuse it.
+    existing = getattr(req.state, "session_id", None)
+    if existing:
+        session_id = existing
+    else:
+        session_id = secrets.token_urlsafe(24)
+        req.state.session_id = session_id
+        save_session_state(session_id, {})
+
+    if response is not None:
+        response.set_cookie(
+            SESSION_COOKIE_NAME,
+            session_id,
+            max_age=SESSION_TTL_SECONDS,
+            path="/",
+            samesite="lax"
+        )
+    return session_id
+
+def default_loc() -> dict:
+    return dict(
+        lat=38.76918,
+        lon=-94.65635,
+        date=date.today().isoformat(),
+        hours_start="20:00",  # 8PM local time default start
+        hours_end="",
+        scope_name="",
+        fl_mm=0,
+        camera_name="",
+        px_um=0.0,
+        rows=0,
+        cols=0,
+        site_name="Powell Observatory",
+        elevation=300.0,
+        timezone= DEFAULT_TIMEZONE,
+        min_altitude=20.0,
+        max_altitude=90.0,
+        ai_text="",
+        sql_query="SELECT * FROM dso_localized WHERE 1=1" # first time we start with everything.
+    )
+
+def read_loc_session(req, response: Response | None = None) -> dict:
+    if response:
+        session_id = ensure_session_id(req, response)
+    else:
+        session_id = get_session_id(req) or getattr(req.state, "session_id", None)
+    state = load_session_state(session_id) # returns a dict with all session data, including "loc" if it exists
+    loc = default_loc()
+    # dict.update merges the default loc with any values from the session, with session values taking precedence
+    loc.update(state.get("loc", {}))
+    return loc
 
 def get_sensor_coverage(dso_min_axis: float, dso_maj_axis: float, 
-    sensor_width_amin: float = 21.5, sensor_height_amin: float = 14.3) -> int:
+                        sensor_width_amin: float = 21.5, sensor_height_amin: float = 14.3) -> int:
     # updated to return in percent, not fraction
     # approximate how relevant the size of the object will be in the view of the telescope
     # all units are arcMINUTES
@@ -63,108 +311,148 @@ def get_sensor_coverage(dso_min_axis: float, dso_maj_axis: float,
     # need at least the major axis, and sensor size
     if (dso_maj_axis and sensor_width_amin and sensor_height_amin):
         sensor_diag = math.sqrt(sensor_height_amin**2 + sensor_width_amin**2)
-        dso_diag = math.sqrt(dso_min_axis**2 + dso_maj_axis**2)
+        dso_diag    = math.sqrt(dso_min_axis**2 + dso_maj_axis**2)
         return round(100 * (dso_diag / sensor_diag))
     else:
         return 0
 
+dso_classes = get_unique_classes(db_path=db_path)
+print(f"Unique DSO classes: {dso_classes}")
+# gets pairs of (abbr, full name)
+dso_constellation_name_pairs = [("all", "All Constellations")] + get_unique_constellations(db_path=db_path)
+print(f"Unique DSO constellation abbreviations: {dso_constellation_name_pairs}")
+ensure_session_table()
 
 # ------------------------ Helpers: filtering/sorting -------------------------
+
+LOC_PARAM_MAP = {
+    "site_name": "site_name",
+    "lat": "lat",
+    "lon": "lon",
+    "date": "date",
+    "elevation": "elevation",
+    "timezone": "timezone",
+    "hstart": "hours_start",
+    "hend": "hours_end",
+    "scope_name": "scope_name",
+    "camera_name": "camera_name",
+    "fl_mm": "fl_mm",
+    "px_um": "px_um",
+    "rows": "rows",
+    "cols": "cols",
+    "min_altitude": "min_altitude",
+    "max_altitude": "max_altitude",
+    "ai_text": "ai_text",
+    "sql_query": "sql_query"
+}
 
 def _parse_bool(val: str|None, *, default=False) -> bool:
     if val is None:
         return default
     return val in {"1", "true", "True", "on", "yes"}
 
-def get_loc(req):
-    qp = req.query_params
-    # localization data from form hidden inputs
-    loc = dict(
-        lat = qp.get("lat"),
-        lon = qp.get("lon"),
-        date = qp.get("date"),            # ISO string
-        hours_start = qp.get("hstart"),
-        hours_end   = qp.get("hend"),
-        fl_mm = qp.get("fl_mm"),
-        px_um = qp.get("px_um"),
-        rows  = qp.get("rows"),
-        cols  = qp.get("cols"),
-    )
-    # if lat or long or date missing, try cookie
-    if not loc['lat'] or not loc['lon'] or not loc['date']:
-        loc.update(read_loc_cookie(req))  # tiny parser
+def _merge_loc(base: dict, mapping) -> dict:
+    loc = dict(base)
+    for param, key in LOC_PARAM_MAP.items():
+        if param in mapping:
+            loc[key] = mapping.get(param)
+    return loc
 
+def normalize_loc(loc: dict) -> dict:
     # make sure lat and long are floats
     try:
-        loc['lat'] = float(loc['lat'])
+        loc['lat'] = float(loc.get('lat')) # type: ignore
     except (TypeError, ValueError):
         loc['lat'] = 38.76918  # powell
     try:
-        loc['lon'] = float(loc['lon'])
+        loc['lon'] = float(loc.get('lon')) # type: ignore
     except (TypeError, ValueError):
         loc['lon'] = -94.65635  # powell
+
     # date is ISO format YYYY-MM-DD
     try:
-        date.fromisoformat(loc['date'])
+        date.fromisoformat(loc.get('date')) # type: ignore
     except (TypeError, ValueError):
         loc['date'] = date.today().isoformat()
-    
+
     # also fl_mm, rows, cols as int
     try:
-        loc['fl_mm'] = int(loc['fl_mm'])
+        loc['fl_mm'] = int(loc.get('fl_mm')) # type: ignore
     except (TypeError, ValueError):
         loc['fl_mm'] = 0
 
     try:
-        loc['px_um'] = float(loc['px_um'])
+        loc['px_um'] = float(loc.get('px_um')) # type: ignore
     except (TypeError, ValueError):
         loc['px_um'] = 0.0  # default pixel size
 
     try:
-        loc['rows'] = int(loc['rows'])
+        loc['rows'] = int(loc.get('rows')) # type: ignore
     except (TypeError, ValueError):
         loc['rows'] = 0
 
     try:
-        loc['cols'] = int(loc['cols'])
+        loc['cols'] = int(loc.get('cols')) # type: ignore
     except (TypeError, ValueError):
         loc['cols'] = 0
 
+    # make sure min/max altitude are floats and within reasonable bounds (0 to 90)
+    try:
+        min_alt = float(loc.get('min_altitude')) # type: ignore
+        if 0 <= min_alt <= 90:
+            loc['min_altitude'] = min_alt
+        else:
+            loc['min_altitude'] = 20.0  # default min altitude
+    except (TypeError, ValueError):
+        loc['min_altitude'] = 20.0
+    try:        
+        max_alt = float(loc.get('max_altitude')) # type: ignore
+        if 0 <= max_alt <= 90:
+            loc['max_altitude'] = max_alt
+        else:
+            loc['max_altitude'] = 90.0  # default max altitude
+    except (TypeError, ValueError):
+        loc['max_altitude'] = 90.0  
+    # print(f"Normalized loc resulted in: {loc}")
     return loc
 
-def read_loc_cookie(req):
-    # parse the cookie string
-    cookie = req.cookies.get("astro_loc", "")
-    decoded = urllib.parse.unquote(cookie)
-    data = json.loads(decoded)
-    print(f"Read loc cookie: {data}")
+def get_loc(req, response: Response | None = None) -> dict:
+    qp = req.query_params
+    print(f"get_loc query params: {qp}")
+    loc = _merge_loc(read_loc_session(req, response), qp)
+    loc = normalize_loc(loc)
+    if response is not None and any(param in qp for param in LOC_PARAM_MAP):
+        session_id = ensure_session_id(req, response)
+        if session_id:
+            state = load_session_state(session_id)
+            state["loc"] = loc
+            save_session_state(session_id, state)
+    return loc
 
-    return dict(
-        lat=data.get("lat", 38.76918),
-        lon=data.get("lon", -94.65635),
-        date=data.get("date", date.today().isoformat()),
-        fl_mm=data.get("fl_mm", 0),
-        px_um=data.get("px_um", 0.0),
-        rows=data.get("rows", 0),
-        cols=data.get("cols", 0)
-    )
-
-def get_filters(req) -> dict:
+def get_filters_from_mapping(qp) -> dict:
     # print(f"\nGet Filters Request URL: {req.url}")
     # e.g. http://localhost:5001/table?q=lisa&region=All&active=any&cat_Gamma=on&min_score=0&max_score=100
-    qp = req.query_params
     q = (qp.get("q") or "").strip()
     a_constellation = qp.get("constellation") or "all"
     constellation = [a_constellation] # convert item to list, with "all" meaning no filtering
+    
     active_sel = qp.get("active") or "any"
     min_hours_viz = int(qp.get("min_hours_viz") or 0)
     min_coverage = int(qp.get("min_coverage") or 0)
     max_coverage = int(qp.get("max_coverage") or 1000)
     # max_hours_viz = int(qp.get("max_hours_viz") or 24)
+    
     classes = [c[0] for c in CLASSES if _parse_bool(qp.get(f"class_{c[0]}"))]
+    # if no classes are selected, treat it as if all are selected (i.e. no filtering)
+    if not classes or len(classes) == 0:
+        classes = ["all"]
+
     # object_types = [t[0] for t in stellarium_object_types if _parse_bool(qp.get(f"object_type_{t[0]}"))]
     # could handle lists but just one at a time for now
     object_types = [t[0] for t in stellarium_object_types if t[0] == qp.get("object_type")]
+    if not object_types or len(object_types) == 0:
+        object_types = ["all"]
+
     sortname = qp.get("sortname") or "dso_id"
     order = qp.get("order") or "asc"
     d = dict(q=q, constellation=constellation, active_sel=active_sel,
@@ -173,6 +461,9 @@ def get_filters(req) -> dict:
     print(f"get_filters returning {d}")
     return d
 
+def get_filters(req) -> dict:
+    return get_filters_from_mapping(req.query_params)
+
 # ----------------------- UI builders (FastTags) ------------------------------
 
 # UI localization bar to show observer location, telescope, sensor, etc
@@ -180,31 +471,70 @@ def get_filters(req) -> dict:
 
 def localization_bar(loc: dict, oob=False) -> FT:
     # compute any derived values here (pixel scale, FOV, darkness window…)
-    return Div(id="locbar", cls="locbar",
-               hx_swap_oob="true" if oob else "false",)(
-        Div(
-            Strong(loc.get("site_name") or "Location"),
-            Br(), Span(f"{loc.get('lat')}, {loc.get('lon')}")
+    lat = loc.get("lat")
+    lon = loc.get("lon")
+    elevation = loc.get("elevation")
+    date_value = loc.get("date")
+    # format date as "20 Dec 2025" for display in the loc bar
+    if date_value:
+        try:
+            date_obj = date.fromisoformat(date_value)
+            date_value = date_obj.strftime("%d %b %Y")
+        except ValueError:
+            date_value = "????"
+
+    hours_start = loc.get("hours_start")
+    timezone = loc.get("timezone")
+    fl_mm = float(loc.get("fl_mm") or 0.0) 
+    rows = int(loc.get("rows") or 0)
+    cols = int(loc.get("cols") or 0)
+    px_um = float(loc.get("px_um") or 0.0)
+    min_altitude = float(loc.get("min_altitude") or 20.0)
+    max_altitude = float(loc.get("max_altitude") or 90.0)
+
+    lat_lon_elev = f"{lat}, {lon}, {elevation}m"
+    date_time_details = f"{hours_start}, {timezone}"
+    scope_details = f"FL {fl_mm} mm"
+    camera_details = f"{rows} rows, {cols} cols, {px_um}\u00b5m"
+    # degree symbol is \u00b0, micro symbol is \u00b5
+    altitude_details = f"Min: {min_altitude}\u00b0, Max: {max_altitude}\u00b0"
+    ai_text = loc.get("ai_text") or ""
+    ai_query = loc.get("sql_query") or ""
+
+    return Fieldset(id="locbar", cls="locbar",
+               hx_swap_oob="true" if oob else "false",
+               hx_get=loc_dialog,
+               hx_target="#loc-dialog-body",
+               hx_swap="innerHTML")(
+        Legend("Click Box to define your Plan", cls="locbar-title"),
+        Div(cls="locbar-top")(
+            Div(cls="locbar-grid")(
+                Div(cls="locbar-item")(
+                    Strong(loc.get("site_name") or "Site", cls="locbar-title"),
+                    Span(lat_lon_elev, cls="locbar-detail")
+                ),
+                Div(cls="locbar-item")(
+                    Strong(date_value or "Date", cls="locbar-title"),
+                    Span(date_time_details, cls="locbar-detail")
+                ),
+                Div(cls="locbar-item")(
+                    Strong(loc.get("scope_name") or "Scope", cls="locbar-title"),
+                    Span(scope_details, cls="locbar-detail")
+                ),
+                Div(cls="locbar-item")(
+                    Strong("DSO Altitude", cls="locbar-title"),
+                    Span(altitude_details, cls="locbar-detail")
+                ),
+                Div(cls="locbar-item")(
+                    Strong(loc.get("camera_name") or "Camera", cls="locbar-title"),
+                    Span(camera_details, cls="locbar-detail")
+                ),
+            ),
         ),
-        Div(
-            Strong(loc.get("scope_name") or "Telescope"),
-            Br(), Span(f"FL {loc.get('fl_mm')} mm")
+        Div(cls="locbar-ai")(
+            Strong("AI Text:"),
+            Span(ai_text + " | SQL Query: " + ai_query, cls="locbar-ai-text")
         ),
-        Div(
-            Strong(loc.get("camera_name") or "Camera"),
-            Br(), Span(f"{loc.get('cols')}×{loc.get('rows')} @ {loc.get('px_um')}µm")
-        ),
-        Div(
-            Button("Change",
-                   id="change-loc",
-                   onclick="openLocDialog()"
-                   # used htmx but now using static <dialog> in <body>
-                   # hx_get=localization,      # see route below
-                   # hx_target="body",        # add dialog to body
-                   # hx_swap="beforeend",   # don't do "afterend" cause it will be outside body!
-                   # hx_push_url="false"
-                )
-        )
     )
 
 def filter_form(filters: dict, loc: dict, oob=False) -> FT:
@@ -233,9 +563,11 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
             # hx_trigger="change from:input, select, checkbox, radio, textarea",
 
         )(
-        Fieldset(
-            Legend("Filters"),
-            Div(
+        Fieldset(cls="post-query-filters")(
+            Legend("Post-query Filters"),
+
+            # row 1
+            Div(cls="filter-row") (
                 Div(Label("Search", Input(name="q", value=filters["q"], placeholder="name contains…", cls="filter-ctl"))),
                 
                 # combo select only one at a time but db expects a list, with ['all'] meaning no filtering
@@ -244,49 +576,39 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
 
                 Div(Label("Object Type", Select(name="object_type", cls="filter-ctl")( *[Option(c[1], value=c[0],
                                 selected=(filters["object_types"]==c[0])) for c in stellarium_object_types] ))),
-
-                # Div(Label("Active", Select(name="active", cls="filter-ctl")( 
-                #     Option("Any", value="any", selected=(filters["active_sel"]=="any")),
-                #     Option("Active", value="true", selected=(filters["active_sel"]=="true")),
-                #     Option("Inactive", value="false", selected=(filters["active_sel"]=="false")),
-                # ))),
-            cls="grid")
-        ),
-        Fieldset(
-            Legend("Classes"), Div(*[classes_box(c) for c in CLASSES], cls="cats"),
-        ),
-        Fieldset(cls="actions")(
-            Legend("Filters"),
-            Div(
-                Label(Safe("Min Hours Visible"), Input(type="number", name="min_hours_viz", value=str(filters["min_hours_viz"]), style="width:fit-content",
-                                     min="0", max=MAX_HOURS_VISIBLE, step=1, cls="filter-ctl")),
-                # Label("Max"), Input(type="number", name="max_hours_viz", value=str(filters["max_hours_viz"]), min=0, max=24, step=1, cls="filter-ctl"),
-                cls="range"
             ),
-            Div(
-                Label("Min FOV %", Input(type="number", name="min_coverage", value=str(filters["min_coverage"]), style="width:fit-content",
-                                     min="0", max="1000", step=10, cls="filter-ctl")),
-                # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
-                cls="range"
-            ),
-            Div(
-                Label("Max FOV %", Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), style="width:fit-content",
-                                     min="0", max="1000", step=10, cls="filter-ctl")),
-                # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
-                cls="range"
-            )
-        ),
 
-        # Hidden localization inputs:
-        Input(type="hidden", name="lat",     value=loc.get("lat") or ""),
-        Input(type="hidden", name="lon",     value=loc.get("lon") or ""),
-        Input(type="hidden", name="date",    value=loc.get("date") or ""),
-        Input(type="hidden", name="hstart",  value=loc.get("hstart") or ""),
-        Input(type="hidden", name="hend",    value=loc.get("hend") or ""),
-        Input(type="hidden", name="fl_mm",   value=loc.get("fl_mm") or ""),
-        Input(type="hidden", name="px_um",   value=loc.get("px_um") or ""),
-        Input(type="hidden", name="rows",    value=loc.get("rows") or ""),
-        Input(type="hidden", name="cols",    value=loc.get("cols") or ""),
+            # row 2
+            Div(cls="filter-row") (
+                Div(
+                    Label("Min FOV %", Input(type="number", name="min_coverage", value=str(filters["min_coverage"]), style="width:fit-content",
+                                        min="0", max="1000", step=10, cls="filter-ctl")),
+                    # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
+                    cls="range"
+                ),
+                Div(
+                    Label("Max FOV %", Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), style="width:fit-content",
+                                        min="0", max="1000", step=10, cls="filter-ctl")),
+                    # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
+                    cls="range"
+                ),
+                Div(
+                    Label(Safe("Min Vis"), Input(type="number", name="min_hours_viz", value=str(filters["min_hours_viz"]),
+                                        style="width:fit-content",
+                                        min="0", max=MAX_HOURS_VISIBLE, step=1, cls="filter-ctl")),
+                    # Label("Max"), Input(type="number", name="max_hours_viz", value=str(filters["max_hours_viz"]), min=0, max=24, step=1, cls="filter-ctl"),
+                    cls="range"
+                ),
+            ),
+            
+            # row 3
+            Div(cls="filter-row") (
+                Fieldset(cls="")(
+                    Legend("Classes"),
+                    Div(*[classes_box(c) for c in CLASSES], cls="cats"),
+                ),
+            ),
+        ),
 
         # add fields to save sort (now "sortname") and order (get persisted into localStorage by JS)
         Input(type="hidden", name="sortname", value=filters.get("sortname") or "ra_dd"),
@@ -298,9 +620,80 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
         #     cls="actions",
         # )
         Div(id="button-container")(
-            Button("Apply", id="apply-filters", type="submit", hx_scroll="this"),
+            Button("Apply Filters", id="apply-filters", type="submit", hx_scroll="this"),
             Button("Reset", cls="secondary", type="button", onclick="window.location.href='/'"),
             cls="actions",
+        )
+    )
+
+def loc_form(loc: dict) -> FT:
+    return Form(
+        id="loc-form",
+        method="post",
+        hx_post=save_loc,
+        hx_target="#table",
+        hx_swap="outerHTML",
+        hx_include="#filters-form"
+    )(
+        Div(cls="loc-grid")(
+            Fieldset(
+                Legend("Site"),
+                Div(cls="loc-fields")(
+                    Label("Site name",   Input(name="site_name", value=loc.get("site_name") or "")),
+                    Label("Latitude",    Input(name="lat", value=loc.get("lat") or "")),
+                    Label("Longitude",   Input(name="lon", value=loc.get("lon") or "")),
+                    Label("Elevation (m)", Input(name="elevation", value=loc.get("elevation") or "")),
+                    Label("Time zone",   Select(name="timezone")(
+                        Option("UTC", value="UTC", selected=(loc.get("timezone")=="UTC")),
+                        # Option("Local (auto-detect)", value="local", selected=(loc.get("timezone")=="local")),
+                        Option("America/New_York", value="America/New_York", selected=(loc.get("timezone")=="America/New_York")),
+                        Option("America/Chicago", value="America/Chicago", selected=(loc.get("timezone")=="America/Chicago")),
+                        Option("America/Denver", value="America/Denver", selected=(loc.get("timezone")=="America/Denver")),
+                        Option("America/Los_Angeles", value="America/Los_Angeles", selected=(loc.get("timezone")=="America/Los_Angeles")),
+                    )),
+                ),
+                cls="loc-section"
+            ),
+            Fieldset(
+                Legend("Date"),
+                Div(cls="loc-fields")(
+                    Label("Date",        Input(type="date", name="date", value=loc.get("date") or "")),
+                    Label("Start hour",  Input(name="hstart", value=loc.get("hours_start") or "")),
+                   # Label("End hour",    Input(name="hend", value=loc.get("hours_end") or "")),
+                ),
+                cls="loc-section"
+            ),
+            Fieldset(
+                Legend("Telescope"),
+                Div(cls="loc-fields")(
+                    Label("Telescope",    Input(name="scope_name", value=loc.get("scope_name") or "")),
+                    Label("Focal length (mm)", Input(name="fl_mm", value=loc.get("fl_mm") or "")),
+                ),
+                cls="loc-section"
+            ),
+            Fieldset(
+                Legend("DSO Altitude Range"),
+                Div(cls="loc-fields")(
+                    Label("Min Altitude (°)",    Input(name="min_altitude", value=loc.get("min_altitude") or "")),
+                    Label("Max Altitude (°)", Input(name="max_altitude", value=loc.get("max_altitude") or "")),
+                ),
+                cls="loc-section"
+            ),
+            Fieldset(
+                Legend("Camera"),
+                Div(cls="loc-fields")(
+                    Label("Camera",       Input(name="camera_name", value=loc.get("camera_name") or "")),
+                    Label("Pixel size (µm)",   Input(name="px_um", value=loc.get("px_um") or "")),
+                    Label("Sensor rows", Input(name="rows", value=loc.get("rows") or "")),
+                    Label("Sensor cols", Input(name="cols", value=loc.get("cols") or "")),
+                ),
+                cls="loc-section"
+            ),
+        ),
+        Fieldset(
+            Legend("AI Context"),
+            Label("AI Text", Textarea(loc.get("ai_text") or "", name="ai_text", rows=4)),
+            cls="loc-ai"
         )
     )
 
@@ -316,7 +709,12 @@ SCORE_SCALE = ColorScale(
 # using Matplotlib's extensive color mapping
 CS_ALT = MapPlotLibColorScale(
     model = "Greens",
-    vmin=0, vmax=80, 
+    vmin=0, vmax=9, 
+)
+
+HSL_GREEN = HSL_Green_Scale(
+    vmin=20, vmax=80,
+    lmin=5, lmax=35
 )
 
 # configuration stuff - column names, etc
@@ -350,7 +748,7 @@ def default_Td(col: ColumnConfig, row: dict) -> FT:
     val = row.get(col.name)
     if col.color_scale and val is not None:
         rgb = col.color_scale.as_rgb_tuple(val)
-        bg  = col.color_scale.as_css_rgba(val)
+        bg  = col.color_scale.as_css(val)
         fg  = best_text_color(rgb)
         style_accum.append(f"background:{bg}")
         style_accum.append(f"color:{fg}")
@@ -379,7 +777,7 @@ def altAzi_Td(col: ColumnConfig, row: dict) -> FT:
     color_val = row.get(col.name + "_alt")  # numeric value for altitude color scale
     if col.color_scale and color_val is not None and color_val >= MIN_ALT_FOR_COLOR:
         rgb = col.color_scale.as_rgb_tuple(color_val)
-        bg  = col.color_scale.as_css_rgba(color_val)
+        bg  = col.color_scale.as_css(color_val)
         fg  = best_text_color(rgb)
         style_accum.append(f"background:{bg}")
         style_accum.append(f"color:{fg}")
@@ -392,6 +790,16 @@ def altAzi_Td(col: ColumnConfig, row: dict) -> FT:
 
     return Td(Safe(val), **attrs)
 
+def nameCatTd(col: ColumnConfig, row: dict) -> FT:
+    """Custom TD for name/catalog that puts the catalog in smaller text below the name."""
+    name = row.get("name") or "Unknown"
+    cat  = row.get("catalog") or ""
+    content = [name]
+    if cat:
+        content.append(Br())
+        content.append(Small(cat, cls="catalog"))
+    return Td(*content, style=col.style, cls=col.cls)
+
 @dataclass
 class ColumnConfig:
     name: str  # the index/key in the data dict
@@ -400,7 +808,7 @@ class ColumnConfig:
     sortable: bool = True
     hdr_cls: Optional[str] = "nowrap"  # optional class for the header TH
     cls: Optional[str] = None  # optional class for the column
-    color_scale: Optional["MapPlotLibColorScale"] = None
+    color_scale: Optional["HSL_Green_Scale"] = None
     header_fn: Optional[GetHeaderFn] = None # custom header generator
     renderTd_fn: Optional[RenderTdFn] = None # custom cell renderer
 
@@ -428,27 +836,37 @@ COL_FIGS: list[ColumnConfig]= [
     #     renderTd_fn = lambda col, row: default_Td(col, row)
     # ),
 
-    ColumnConfig(name = "name", width = "14%", style=None, hdr_cls="wrap", cls="wrap", sortable=True, color_scale=None,
+    ColumnConfig(name = "name", width = "18%", style=None, hdr_cls="wrap", cls="wrap", sortable=True, color_scale=None,
         header_fn = lambda col, row: "Name",
+        renderTd_fn = lambda col, row: nameCatTd(col, row)
+    ),
+
+    # ColumnConfig(name = "catalog", width = "5%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+    #     header_fn = lambda col, row: "Cat",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
+
+    ColumnConfig(name = "RA", width = "4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "RA",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name = "catalog", width = "5%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
-        header_fn = lambda col, row: "Cat",
+    ColumnConfig(name = "AZI", width = "4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "AZI",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name = "class", width = "4%", style=None, cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name = "class", width = "4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Class",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name = "type", width = "4%", style=None, cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name = "type", width = "4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Type",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name = "constellation_abbr", width = "4%", style=None, cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name = "constellation_abbr", width = "4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Cons",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
@@ -456,33 +874,39 @@ COL_FIGS: list[ColumnConfig]= [
     # ColumnConfig("mag", "Magnitude", "6%", None, True, None),
 
     # ColumnConfig("size", "Size", "12%", None, False, None), # nn x nn
-    ColumnConfig(name="coverage", width="4%", style=None, cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name="coverage", width="4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "FOV %",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name="rise", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
-        header_fn = lambda col, row: "Rise",
-        renderTd_fn = lambda col, row: default_Td(col, row)
-    ),
-    ColumnConfig(name="transit", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+    # earlier code used dos['rise'] but now we use dso['rise_time']
+    # ColumnConfig(name="rise_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+    #     header_fn = lambda col, row: "Rise",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
+    ColumnConfig(name="transit_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Trans",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
-    ColumnConfig(name="set", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
-        header_fn = lambda col, row: "Set",
+    # ColumnConfig(name="set_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+    #     header_fn = lambda col, row: "Set",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
+
+    # ColumnConfig(name="score", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=CS_ALT,
+    #     header_fn = lambda col, row: "SCR",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
+
+    ColumnConfig(name="distance", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Dist",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name="score", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=CS_ALT,
-        header_fn = lambda col, row: "SCR",
-        renderTd_fn = lambda col, row: default_Td(col, row)
-    ),
-
-    ColumnConfig(name="hours_viz", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
-        header_fn = lambda col, row: "Viz",
-        renderTd_fn = lambda col, row: default_Td(col, row)
-    ),
+    # ColumnConfig(name="hours_viz", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+    #     header_fn = lambda col, row: "Viz",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
 
     # ColumnConfig("score", "4%", "text-align:center;", True, None,
     #     get_header=lambda row: "Score",
@@ -490,33 +914,33 @@ COL_FIGS: list[ColumnConfig]= [
 
     # # five more data / time columns algorithmically generated
 
-    ColumnConfig(name="obsTime0", width="9%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+    ColumnConfig(name="obsTime0", width="8%", style="text-align:center;padding:1px 1px;",
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime0_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
-    ColumnConfig(name="obsTime1", width="9%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+    ColumnConfig(name="obsTime1", width="8%", style="text-align:center;padding:1px 1px;",
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime1_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
-    ColumnConfig(name="obsTime2", width="9%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+    ColumnConfig(name="obsTime2", width="8%", style="text-align:center;padding:1px 1px;",
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime2_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
-    ColumnConfig(name="obsTime3", width="9%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+    ColumnConfig(name="obsTime3", width="8%", style="text-align:center;padding:1px 1px;",
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime3_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
-    ColumnConfig(name="obsTime4", width="9%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+    ColumnConfig(name="obsTime4", width="8%", style="text-align:center;padding:1px 1px;",
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime4_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
-    ColumnConfig(name="obsTime5", width="10%", style="text-align:center;padding:2px 2px;",
-                  cls=None, sortable=False, color_scale=CS_ALT,
+    ColumnConfig(name="obsTime5", width="8%", style="text-align:center;padding:1px 1px;",
+                  cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime5_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
@@ -619,11 +1043,154 @@ def apply_sentinel(trs: list[FT], *, next_page:int, has_more:bool, sortname:str,
             )
         )
 
+def _serialize_fragments(content: Any) -> str:
+    if isinstance(content, (tuple, list)):
+        return "".join(to_xml(item) for item in content)
+    return to_xml(content)
+
 # ------------------------------- Routes --------------------------------------
 
+
+async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
+    # in a real implementation, this would call the AI agent with the current loc and filters, and get back an updated loc and a SQL query to run
+    # for now, just return the same loc and a dummy SQL query
+
+    print(f"AI Agent called with loc: {loc} and filters: {filters}")
+
+
+    updated_deps = AstroDependencies(
+        # make sure these defaults are 'now' at runtime
+        # note this should be CLIENT "now" not server!
+        # if loc has a date and time, use that as the default for the AI agent, otherwise use current date and time
+        default_time=datetime.now(ZoneInfo("America/Chicago")).strftime("%H:%M"),
+        default_date=datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d"),
+        default_timezone="America/Chicago",
+        default_location="Powell Observatory, Kansas", # this should be findable 
+        default_telescope="Astrophysics 130EDF F6.3",
+        default_camera="ZWO ASI 2600MC Pro",
+        default_min_altitude=20.0,
+        default_max_altitude=90.0,
+    )
+    # if loc has specific values for these, override the defaults for the AI agent
+    if loc.get("lat") and loc.get("lon"):
+        updated_deps.default_latitude = loc["lat"]
+        updated_deps.default_longitude = loc["lon"]
+    if loc.get("date"):
+        updated_deps.default_date = loc["date"]
+    if loc.get("hours_start"):
+        updated_deps.default_time = loc["hours_start"]
+    if loc.get("site_name"):
+        updated_deps.default_location = loc["site_name"]
+    if loc.get("scope_name"):
+        updated_deps.default_telescope = loc["scope_name"]
+    if loc.get("camera_name"):
+        updated_deps.default_camera = loc["camera_name"]
+    if loc.get("elevation"):
+        updated_deps.default_elevation = loc["elevation"]
+    if loc.get("timezone"):
+        updated_deps.default_timezone = loc["timezone"]
+    if loc.get("min_altitude"):
+        updated_deps.default_min_altitude = loc["min_altitude"]
+    if loc.get("max_altitude"):
+        updated_deps.default_max_altitude = loc["max_altitude"]
+    
+    user_query = loc['ai_text']
+
+    if not user_query:
+        print("No User AI query provided, skipping AI Agent and returning original loc with dummy SQL")
+        return {**loc, 'sql_query': "SELECT * FROM dso_localized WHERE 1=1"}
+    
+    result = await single_agent_astro_plan.run(user_query, deps=updated_deps)
+    ai_query = "" # the query we use to filter Dso, with or without AI help
+    
+    if isinstance(result.output, SA_Plan):
+        # update loc with new info from plan
+        print(f"AI Agent returned plan: {result.output}")
+        if result.output.observer_context:
+            loc['site_name'] = result.output.observer_context.location
+            loc['lat'] = result.output.observer_context.latitude_deg
+            loc['lon'] = result.output.observer_context.longitude_deg
+            loc['elevation'] = result.output.observer_context.elevation_m
+            loc['date'] = result.output.observer_context.observe_date
+            loc['hours_start'] = result.output.observer_context.observe_time 
+            loc['timezone'] = result.output.observer_context.timezone
+            loc['min_altitude'] = result.output.observer_context.min_altitude
+            loc['max_altitude'] = result.output.observer_context.max_altitude
+            # loc['hours_end'] = result.output.observer_context.hours_end
+        if result.output.equipment and result.output.equipment.telescope:
+            loc['fl_mm'] = result.output.equipment.telescope.focal_length_mm
+            loc['scope_name'] = result.output.equipment.telescope.name
+        if result.output.equipment and result.output.equipment.camera:
+            loc['px_um'] = result.output.equipment.camera.pixel_um
+            loc['rows'] = result.output.equipment.camera.sensor_rows
+            loc['cols'] = result.output.equipment.camera.sensor_columns
+            loc['camera_name'] = result.output.equipment.camera.name
+        if result.output.valid_plan:
+            ai_query = result.output.sql_query
+        else:
+            print(f"AI Agent returned invalid plan: {result.output}")
+            # FIXME return this to client via toast or popup!
+            ai_query = "SELECT * FROM dso_localized WHERE 1=1"  # fallback dummy query
+    else:
+        print(f"AI Agent returned non-plan output: {result.output}")
+        # FIXME return this to client via toast or popup!
+        ai_query = "SELECT * FROM dso_localized WHERE 1=1"  # fallback dummy query
+    
+    updated_loc = dict(loc)
+    # updated_loc["ai_text"] = ai_query 
+    updated_loc['sql_query'] = ai_query #FIXME naming 
+
+    return updated_loc
+
+@rt('/loc/dialog')
+def loc_dialog(req) -> FT:
+    loc = get_loc(req)
+    return loc_form(loc)
+
+@rt('/loc/save')
+async def save_loc(req):
+    # this saves the localization (loc-form) but ALSO includes the current filters from the filter form
+    # the fields are all merged into the req form 
+    form = await req.form()
+    form_data = dict(form) if form else dict(req.query_params)
+
+    print(f"/loc/save got form data: {form_data}") # dumps all Loc and Filter fields
+
+    loc = normalize_loc(_merge_loc(read_loc_session(req), form_data))
+
+    print(f"Normalized loc: {loc}")
+
+    filters = get_filters_from_mapping(form_data)
+
+    # I think this is where the AI Agent will step in. 
+    # will fale it for now
+
+    updated_loc = await ai_update_loc_and_generate_sql(loc, filters)
+
+    # note that table can't see the new cookie values since it's all in the same request, 
+    #  so we have to pass the new loc and filtervalues directly to it as overrides
+    table_content = table(
+        req,
+        sortname=filters.get("sortname") or "dso_id",
+        order=filters.get("order") or "asc",
+        update_localization=True,
+        filters_override=filters, # newly updated filters from the form submission
+        localization_override=updated_loc # newly updated localization from the form submission
+    )
+
+    response = Response(_serialize_fragments(table_content), media_type="text/html")
+    session_id = ensure_session_id(req, response)
+    if session_id:
+        state = load_session_state(session_id)
+        state["loc"] = updated_loc
+        save_session_state(session_id, state)
+    return response
+
 @rt
-def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
+async def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
     # note index handles http initial load as well as htmx table update
+
+    # await async_func(42)  # just testing that async works in FastHTML routes
 
     # get localization from hidden fields in query request
     loc = get_loc(req)  # TODO: cookie fallback
@@ -648,35 +1215,24 @@ def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
     # Otherwise return the full page
     print(f"Got FULL /index HTTP request with sort:{sortname} and returning full page")
 
-    return Titled(
-        "FastHTML + HTMX Demo",
+    page = Titled(
+        "FastHTML + HTMX Demo - AI version",
         Link(rel="stylesheet", href="/static/app.css?v=1"),
         content,
+        Div(id="table-spinner", cls="table-spinner")(
+            Div(cls="spinner"),
+            Div("Updating table...", cls="spinner-text")
+        ),
 
         # Static dialog included once; it stays in DOM between opens
         # use starlette StaticFiles mount at /static/ for scripts, css, images, etc
 
         Dialog(id="loc-dialog", cls="modal")(
             Div(cls="layout")(
-                H2("Change localization"),
-                Div(cls="body")(
-                    Form(id="loc-form")(
-                        Div(cls="grid2")(
-                            Label("Site name",   Input(name="site_name")),
-                            Label("Date",        Input(type="date", name="date")),
-                            Label("Latitude",    Input(name="lat")),
-                            Label("Longitude",   Input(name="lon")),
-                            Label("Start hour",  Input(name="hstart")),
-                            Label("End hour",    Input(name="hend")),
-                            Label("Focal length (mm)", Input(name="fl_mm")),
-                            Label("Pixel size (µm)",   Input(name="px_um")),
-                            Label("Sensor rows", Input(name="rows")),
-                            Label("Sensor cols", Input(name="cols")),
-                        )
-                    )
-                ),
+                H2("Specify your observing plan..."),
+                Div("Loading...", cls="body", id="loc-dialog-body"),
                 Div(cls="footer")(
-                    Button("Save", type="button", id="save-loc"),
+                    Button("Execute Plan", type="submit", form="loc-form", id="save-loc"),
                     Form(method="dialog")(Button("Cancel"))
                 )
             )
@@ -687,27 +1243,31 @@ def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
         # or set windows.xxxx = xxxxx
         Script(src="/static/scripts.js?v=6", type="module", defer=True),
     )
+    return page
 
 
 @rt
-def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization: bool = True):
+def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization: bool = True,
+          filters_override: dict | None = None, localization_override: dict | None = None):
     """Render the FULL table with the first page and a row-sentinel at the end."""
     # sort is the name of the column to sort on
-
-    # we need to fetch all the data to get proper column headers for dynamic ones
-    # but we only render the first page of rows here
-    # pass raw_data to rows() so it doesn't reload the data again
-    # when rows is called from htmx, it will load the data itself
-
     # localization is whether to include the localization bar (oob) or not
+    # filters_override and localization_override are used to pass updated values from the loc_form submission 
+    #   since the session values might not be updated until the next request (??)
 
-    filters     = get_filters(req)
-    localization = get_loc(req)  # TODO: cookie fallback
+    filters = filters_override or get_filters(req)
+    localization = localization_override or get_loc(req)
     
-    print(f"---->>>>loading raw data for /table with sortname:{sortname}, order:{order}")
-    raw_data = load_filter_localize_data(db_path, filters, localization, sortname, order)
+    # print(f"---->>>>loading raw data for /table with sortname:{sortname}, order:{order}")
+    # raw_data = load_filter_localize_data(db_path, filters, localization, sortname, order)
+    
+    # debug test for now
+    session_id = ensure_session_id(req)
+    assert session_id is not None, "Session ID should not be None in /rows route"
+    raw_data = load_localize_filter_expand_sort_dso_data(session_id, db_path, filters, localization, sortname, order)
+    print(f"Test load_localize_filter_expand_sort_dso_data returned {len(raw_data)} rows for session {session_id}")
 
-    trs = rows(req, page=1, sortname=sortname, order=order, raw_data=raw_data)  # call the route function directly to get first page
+    trs = rows(req, page=1, sortname=sortname, order=order, raw_data=raw_data, localization=localization)  # call the route function directly to get first page
 
     # if there are no rows, return an empty table with no headers since we need rows to get dynamic headers
     if not trs or len(raw_data) == 0:
@@ -756,7 +1316,8 @@ def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization
 
 # def rows(req, page: int = 2, sort: str = "dso_id", order: str = "asc", row_data:list[dict]|None=None) -> tuple[FT,...]:
 @rt
-def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc", raw_data: list[dict]|None = None): #  -> tuple[FT,...]:
+def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc", 
+         raw_data: list[dict]|None = None, localization: dict = {}): #  -> tuple[FT,...]:
     """Return the *next page* of <tr> elements. The last <tr> becomes the new sentinel.
     Since the triggering row uses hx-swap=afterend, these rows are inserted after it.
     """
@@ -774,17 +1335,24 @@ def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc", raw_d
     # if we already have the data (on index page fetch), use it; otherwise (htmx) load from DB
     if raw_data is not None:
         print(f"Using passed raw_data with {len(raw_data)} rows. Request: {req.query_params}")
-        localization = get_loc(req)
-        print(f"Using localization: {localization}")
+        localization = localization or get_loc(req)  # if localization not passed in, get it from the request
+        # print(f"Using localization: {localization}")
         # FIXME should sort the raw_data here using cookie values for loc??
         sorted_rows = raw_data
     else:
-        filters     = get_filters(req)
-        localization = get_loc(req)  # TODO: cookie fallback
-        print(f"loading raw data for HTMX ROWS page {page} Request: {req.query_params} ")
-        sorted_rows = load_filter_localize_data(db_path, filters, localization, sortname, order)
+        # filters     = get_filters(req)
+        # localization = get_loc(req) 
+        # print(f"loading raw data for HTMX ROWS page {page} Request: {req.query_params} ")
+        # sorted_rows = load_filter_localize_data(db_path, filters, localization, sortname, order)
+        
+        session_id = ensure_session_id(req)
+        filters2     = get_filters(req)
+        localization = get_loc(req) 
+        assert session_id is not None, "Session ID should not be None in /rows route"
+        sorted_rows = load_localize_filter_expand_sort_dso_data(session_id, db_path, filters2, localization, sortname, order)
+        print(f"Test load_localize_filter_expand_sort_dso_data returned {len(sorted_rows)} rows for session {session_id}")
 
-    print(f"After filtering, {len(sorted_rows)} rows match criteria")
+    # debug test for now
     
     start = (page - 1) * PAGE_SIZE
     end   = start + PAGE_SIZE
@@ -813,7 +1381,7 @@ def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc", raw_d
 
 
 @rt
-def detail(req, dso_id: str, localization: dict = {}) -> FT:
+async def detail(req, dso_id: str, localization: dict = {}) -> FT:
     """Simple detail page placeholder. Normal navigation (not HTMX) so the browser's
     Back button returns to the exact table state (filters/sort preserved).
 
@@ -846,6 +1414,44 @@ def detail(req, dso_id: str, localization: dict = {}) -> FT:
         A("Open table", href=index),
         cls="backbar"
     )
+
+    ai_info = Div(
+        Div(
+            H3("AI-generated summary info about this DSO", cls="ai-info-title"),
+            P("Loaded asynchronously", cls="ai-info-kicker"),
+            cls="ai-info-header"
+        ),
+        Div(
+            Div(
+                Div(cls="spinner"),
+                Div(
+                    P("Fetching info...", cls="ai-info-status-text"),
+                    P("The detail page is ready; this summary is loading in the background.", cls="ai-info-status-note"),
+                ),
+                id="ai-info-loading",
+                cls="ai-info-loading htmx-indicator",
+                data_ai_loading="true"
+            ),
+            P(
+                "Unable to fetch AI info right now. Check your internet connection and try again.",
+                cls="ai-info-error",
+                data_ai_error="true",
+                hidden=True
+            ),
+            cls="ai-info-body"
+        ),
+        id="ai-info",
+        cls="ai-info-panel",
+        hx_get=dso_ai_info.to(dso_id=dso_id),
+        hx_trigger="load",
+        hx_swap="outerHTML",
+        hx_indicator="#ai-info-loading"
+    )
+    ai_info.attrs.update({
+        'hx-on::send-error': "const error = this.querySelector('[data-ai-error]'); if (error) { error.hidden = false; error.textContent = 'Unable to fetch AI info right now. Check your internet connection and try again.'; }",
+        'hx-on::response-error': "const error = this.querySelector('[data-ai-error]'); if (error) { error.hidden = false; error.textContent = 'The AI info request failed. Please try again in a moment.'; }"
+    })
+
 
     details = Table(cls="striped")(
         Thead(Tr(Th("Field"), Th("Value"))),
@@ -913,12 +1519,151 @@ def detail(req, dso_id: str, localization: dict = {}) -> FT:
     return Titled(
         f"Details for ID {row['name']} (id:{dso_id})",
         # add css
-        Link(rel="stylesheet", href="/static/app.css?v=3"),
+        Link(rel="stylesheet", href="/static/app.css?v=4"),
+        MarkdownJS(sel=".ai-info-markdown"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/suncalc/1.9.0/suncalc.min.js"),
         Script(src="/static/scripts.js?v=5", type="module", defer=True),
 
-        Div(backbar, details, ra_dec_d3, dso_moon_d3, cls="container")
+        Div(backbar, ai_info, details, ra_dec_d3, dso_moon_d3, cls="container")
+    )
+
+
+@rt('/detail/{dso_id}/ai-info')
+async def dso_ai_info(dso_id: str) -> FT:
+    row = load_dso_by_id(dso_id, db_path)
+    if not row:
+        return Div(
+            Div(
+                H3(f"AI-generated summary info", cls="ai-info-title"),
+                # P("Loaded asynchronously", cls="ai-info-kicker"),
+                cls="ai-info-header"
+            ),
+            Div(
+                P("No record with that id."),
+                cls="ai-info-body"
+            ),
+            id="ai-info",
+            cls="ai-info-panel"
+        )
+
+    obj_name = f"{row['name']} {row['catalog'] or ''}".strip()
+    user_query = DSOInfoQuery(text=obj_name)
+    wiki_title = ""
+
+    try:
+        info_result = await dso_info_agent.run(user_query.text)
+        # print(f"DSO Info Agent returned: {info_result}")
+        if isinstance(info_result.output, DSOInfo):
+            summary = Div(info_result.output.text, cls="ai-info-markdown")
+            wiki_title = info_result.output.wikipedia_title or ""
+        else:
+            summary = P("Sorry, no AI info available for this object.")
+    except Exception as exc:
+        print(f"DSO Info Agent failed for {dso_id}: {exc}")
+        summary = P("Sorry, no AI info available for this object.")
+
+    image_slot = Div(
+        Div(cls="spinner"),
+        P("Looking for a Wikipedia image...", cls="ai-info-image-status"),
+        id="ai-info-image",
+        cls="ai-info-image-slot",
+        hx_get=dso_ai_image.to(dso_id=dso_id, wiki_title=wiki_title),
+        hx_trigger="load",
+        hx_swap="outerHTML"
+    )
+
+    return Div(
+        Div(
+            H3(f"AI-generated summary info for {obj_name}", cls="ai-info-title"),
+            # P("Loaded asynchronously", cls="ai-info-kicker"),
+            cls="ai-info-header"
+        ),
+        Div(summary, image_slot, cls="ai-info-body"),
+        id="ai-info",
+        cls="ai-info-panel"
+    )
+
+
+@rt('/detail/{dso_id}/ai-image')
+async def dso_ai_image(dso_id: str, wiki_title: str = ""):
+    row = load_dso_by_id(dso_id, db_path)
+    if not row:
+        return ""
+
+    obj_name = f"{row['name']} {row['catalog'] or ''}".strip()
+    image_info = await asyncio.to_thread(
+        _lookup_wikipedia_image,
+        [
+            wiki_title,
+            obj_name,
+            row.get("name"),
+            row.get("catalog"),
+            f'"{row.get("name") or ""}" astronomy',
+            f'"{row.get("catalog") or ""}" astronomy',
+        ]
+    )
+    if not image_info:
+        return ""
+
+    return Div(
+        H4("Wikipedia image", cls="ai-info-image-title"),
+        Figure(
+            A(
+                Img(
+                    src=dso_ai_image_proxy.to(dso_id=dso_id, image_url=image_info["image_url"]),
+                    alt=f"Wikipedia image for {obj_name}",
+                    loading="lazy",
+                    cls="ai-info-image"
+                ),
+                href=image_info["image_url"],
+                target="_blank",
+                rel="noopener noreferrer"
+            ),
+            Figcaption(
+                A(
+                    "Open full image",
+                    href=image_info["image_url"],
+                    target="_blank",
+                    rel="noopener noreferrer"
+                ),
+                Span(" · "),
+                A(
+                    f"Wikipedia: {image_info['title']}",
+                    href=image_info["page_url"],
+                    target="_blank",
+                    rel="noopener noreferrer"
+                ),
+                cls="ai-info-image-links"
+            ),
+            cls="ai-info-image-figure"
+        ),
+        id="ai-info-image",
+        cls="ai-info-image-block"
+    )
+
+
+@rt('/detail/{dso_id}/ai-image-proxy')
+async def dso_ai_image_proxy(dso_id: str, image_url: str = ""):
+    if not image_url or not _is_allowed_wiki_image_url(image_url):
+        return Response(status_code=404)
+
+    try:
+        image_bytes, content_type = await asyncio.to_thread(_fetch_remote_bytes, image_url)
+        output_bytes, output_type = await asyncio.to_thread(
+            _convert_image_bytes_if_needed,
+            image_url,
+            image_bytes,
+            content_type,
+        )
+    except Exception as exc:
+        print(f"Wikipedia image proxy failed for {dso_id}: {exc}")
+        return Response(status_code=502)
+
+    return Response(
+        content=output_bytes,
+        media_type=output_type,
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 ## routines for showing d3 RA/Dec chart in detail page
@@ -927,6 +1672,7 @@ def detail(req, dso_id: str, localization: dict = {}) -> FT:
 def get_dso_positions(dso_id: str, 
                       lat: float = 38.9, 
                       lon: float = -94.6,
+                      elevation: float = 300,
                       date: Optional[str] = None,
                       tz: str = DEFAULT_TIMEZONE):
     """
@@ -949,7 +1695,7 @@ def get_dso_positions(dso_id: str,
         raise ValueError("DSO not found")
 
     # FIXME clean this up with less complex routine
-    dso, data_points = calculate_dso_positions(dso_data, lat, lon, obs_date)
+    dso, data_points = calculate_dso_positions(dso_data, lat, lon, elevation, obs_date)
 
     # FIXME with how many hours to show
     observer_hours = {
@@ -970,7 +1716,7 @@ def get_dso_positions(dso_id: str,
     }
 
 @rt('/api/dso-moon-chart-data/{dso_id}/localization')
-def get_dso_moon_chart_data(dso_id: str, lat: float, lon: float, date: str, tz: str):
+def get_dso_moon_chart_data(dso_id: str, lat: float, lon: float, elevation: float, date: str, tz: str):
     """
     API endpoint that returns JSON data for the DSO moon chart
     """
@@ -989,11 +1735,11 @@ def get_dso_moon_chart_data(dso_id: str, lat: float, lon: float, date: str, tz: 
         obs_date = datetime.now(ZoneInfo(tz))
 
     # Fetch DSO and moon sample data for 9pm local time
-    dso_moon_data = get_data_for_dso_moon_chart(dso_data, lat, lon, obs_date,
+    dso_moon_data = get_data_for_dso_moon_chart(dso_data, lat, lon, elevation, obs_date,
                                                 sample_hour=21, tz=tz)
     if not dso_moon_data:
         raise ValueError("DSO moon data not found")
-    print(f"Ready to return moon chart data {dso_moon_data}")
+    # print(f"Ready to return moon chart data {dso_moon_data}")
     return dso_moon_data
 
 @rt('/nonexistent') # dummy endpoint for hx-get in detail page
@@ -1001,18 +1747,6 @@ def do_nothing():
     """This endpoint does nothing; it's just a placeholder for hx-get in the detail page."""
     print("Called /nonexistent endpoint - doing nothing")
     return ""
-
-####
-# Celestial "sky map" stuff from Claude
-# @app.get("/")
-# def home():
-#     return Html(
-#         Head(Title("Astronomy Tools")),
-#         Body(
-#             H1("Astronomy Tools"),
-#             A("Open Sky Map", href="/sky-map", target="_blank"),
-#         )
-#     )
 
 @app.get("/sky-map")
 def sky_map_page():
