@@ -25,11 +25,7 @@ venv/
 *.secrets
 
 # Local runtime data
-data/
 tmp/
-*.db
-*.sqlite
-*.sqlite3
 
 # Tooling and editor files
 .vscode/

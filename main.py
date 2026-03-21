@@ -1779,5 +1779,7 @@ def get_sky_map_data():
         "observerLong": observer_long
     }
 
-# ------------------------------ Run server -----------------------------------
-serve()
+# if running locally, use serve() to get debugging
+# docker version will run with uvicorn
+if __name__ == "__main__":
+    serve() 

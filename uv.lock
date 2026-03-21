@@ -756,6 +756,7 @@ dependencies = [
     { name = "pydantic-ai" },
     { name = "python-fasthtml" },
     { name = "timezonefinder" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -768,6 +769,7 @@ requires-dist = [
     { name = "pydantic-ai", specifier = ">=1.59.0" },
     { name = "python-fasthtml", specifier = ">=0.12.25" },
     { name = "timezonefinder", specifier = ">=8.0.0" },
+    { name = "uvicorn", specifier = ">=0.35.0" },
 ]
 
 [[package]]

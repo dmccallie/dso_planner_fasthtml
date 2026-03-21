@@ -13,4 +13,5 @@ dependencies = [
     "pydantic-ai>=1.59.0",
     "python-fasthtml>=0.12.25",
     "timezonefinder>=8.0.0",
+    "uvicorn>=0.35.0",
 ]

@@ -1,0 +1,7 @@
+services:
+  # to run with local build, docker compose up -d --build is good
+  # to run with pre-built image, docker compose -f compose.yaml up -d is nec to avoid the override build step!
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
