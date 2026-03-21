@@ -272,7 +272,8 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         # add display value of ra in hours and minutes, for display only, keep ra_dd for sorting
         ra_hours = int(dso['ra_dd'] / 15)
         ra_minutes = int((dso['ra_dd'] / 15 - ra_hours) * 60)
-        dso['RA'] = f"{ra_hours}h {ra_minutes}m"
+        # dso['RA'] = f"{ra_hours}h {ra_minutes}m"
+        dso['RA'] = f"{ra_hours}:{ra_minutes}"
 
         # fix up rise set transit times to be localized strings for display, and sortable strings for sorting
         # FIXME consider move to Td display logic
@@ -316,8 +317,10 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
             sens_cov = get_sensor_coverage(dso_min_axis, dso_maj_axis, width_amin, height_amin)
 
             dso['coverage'] = int(sens_cov) # already in percent (0.0-100.0)
+            dso['coverage_sort'] = sens_cov # sortable value for coverage
         else:
             dso['coverage'] = 0
+            dso['coverage_sort'] = 0
 
         # filter out records by coverage
         if 'min_coverage' in filters and dso['coverage'] < filters['min_coverage']:
@@ -360,6 +363,14 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         # fake hours_viz for now - revisit FIXME
         dso['hours_viz'] = number_hours_viz
 
+        # add 'AZI' for the azimuth at the first observation time, for display and filtering
+        if results[0] is not None:
+            dso['AZI'] = f"{results[0]['azimuth']:.0f}\u00B0"
+            dso['AZI_sort'] = results[0]['azimuth'] # sortable value for azimuth    
+        else:
+            dso['AZI'] = "---"
+            dso['AZI_sort'] = float('inf') # sort to end if no azimuth value
+
         # print(f"distance check: distance = {dso.get('angular_distance_deg', 'n/a')} for DSO {dso['name']} with altitudes {[dso[f'obsTime{i}_alt'] for i in range(0, NUMBER_OBS_TIMES)]} and airmasses {[results[i]['airmass'] if results[i] is not None else 'n/a' for i in range(0, NUMBER_OBS_TIMES)]} and hours_viz {dso['hours_viz']}")
         # add distance for this queries that use distance or n/a
         # format distance to 1 decimal place if it's a number
@@ -396,6 +407,11 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         sort_key = 'transit_time_sort' # use sortable version of transit time
     elif sort_key == 'distance':
         sort_key = 'distance_sort' # use sortable version of distance
+    elif sort_key == 'AZI':
+        sort_key = 'AZI_sort' # sort by azimuth
+    elif sort_key in VALID_SORTS:
+        pass # sort_key is valid as is
+
     else:
         sort_key = 'ra_dd' # default sort by RA
 

@@ -173,3 +173,9 @@ class EquipmentQuery(BaseModel):
 class ObserverContextQuery(BaseModel):
     text: str
 
+class DSOInfoQuery(BaseModel):
+    text: str = Field(..., description="The name and catalog of the deep space object to query for information, e.g. 'Andromeda M 31' or 'NGC 1976'")
+
+class DSOInfo(BaseModel):
+    text: str = Field(..., description="Markdown summary information about the deep space object, including its class, type, constellation, brightness, size, and any other relevant details that would be useful for an amateur astronomer planning an observation session.")
+    wikipedia_title: Optional[str] = Field(default=None, description="Best matching English Wikipedia page title for this object if known. Return null if unsure.")

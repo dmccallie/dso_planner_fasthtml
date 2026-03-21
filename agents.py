@@ -10,7 +10,7 @@ import datetime
 
 import dotenv
 
-from ai_data_models import AstroDependencies, Camera, DeepSpaceObjectID, Plan, SA_Plan, Telescope, Equipment, ObserverContext, DeepSpaceObject
+from ai_data_models import AstroDependencies, Camera, DSOInfo, DeepSpaceObjectID, Plan, SA_Plan, Telescope, Equipment, ObserverContext, DeepSpaceObject
 from ai_data_models import EquipmentQuery, ObserverContextQuery
 from ai_data_models import model_string, model_settings
 
@@ -216,6 +216,26 @@ single_agent_astro_plan = Agent(
     # deps is a member of RunContext, so will be accessible in tools via ctx.deps
     deps_type=AstroDependencies
 )
+
+dso_info_agent = Agent(
+    model_string,
+    model_settings=model_settings, 
+    system_prompt="""
+    You are a friendly expert providing the user with summary information about deep space objects.
+    Include information that would be useful for an amateur astronomer planning an observation session.
+    Also include interesting facts that might be useful for educating the public about the object.
+    No need to include information about the object's visibility since the user will be running SQL queries to find objects that are visible based on their observer context.
+    Format the response as concise Markdown suitable for display in a UI card.
+    Prefer a short opening sentence followed by a few short bullet points when helpful.
+    Keep the response short - a couple of paragraphs or a compact bulleted list at most.
+    Do not wrap the response in code fences.
+    Also return the best matching English Wikipedia page title for the object when you know it with high confidence.
+    If you are not confident about the Wikipedia page title, return null for wikipedia_title.
+    """,
+    output_type = DSOInfo,
+    retries=2,
+)
+
 
 # provide run-time instructions based on default
 # in logfire, this shows up under: attributes.gen_ai.system_instructions as text 

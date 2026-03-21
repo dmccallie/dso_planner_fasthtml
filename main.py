@@ -12,18 +12,23 @@ from zoneinfo import ZoneInfo
 import random
 from datetime import date, timedelta
 from time import perf_counter
-from typing import Callable, Any
+from typing import Callable, Any, Sequence
 import json
+from io import BytesIO
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request as UrlRequest, urlopen as urllib_urlopen
 from faker import Faker
 from fasthtml.common import *
+from PIL import Image
 
 import asyncio
 
+from prompt_toolkit import HTML
 from starlette.staticfiles import StaticFiles
 from starlette.responses import Response
 
 
-from ai_data_models import AstroDependencies, SA_Plan
+from ai_data_models import AstroDependencies, DSOInfoQuery, SA_Plan, DSOInfo
 from color_utils import ColorScale, HSL_Green_Scale, best_text_color, MapPlotLibColorScale
 
 from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_dso_positions, get_data_for_dso_moon_chart, \
@@ -33,30 +38,36 @@ from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_dso_positi
 from manage_dso_data import get_unique_constellations, load_dso_by_id, load_dso_subset, get_unique_classes, \
         get_localized_dso_data, load_localize_filter_expand_sort_dso_data
 
-from agents import single_agent_astro_plan
+from agents import single_agent_astro_plan, dso_info_agent
 
 # set up some stuff for pydantic-ai and logfire
 # fetch openai api key from env file
 import dotenv
 dotenv.load_dotenv()
 
-# logire notes:
-# Your Logfire credentials are stored in /home/david/.logfire/default.toml
-# setup using logfire-cli via uv
-# uv add logfire
-# uv run logfire auth
-# uv run logfire projects use astro-planner-project
-#  https://logfire-us.pydantic.dev/dmccallie/astro-planner-project
-import logfire
+# import logfire if in debug
+DEBUG = os.getenv("DEBUG", "false").lower() in {"1", "true", "yes"}
+if DEBUG:
+    # logfire notes:
+    # Your Logfire credentials are stored in /home/david/.logfire/default.toml
+    # setup using logfire-cli via uv
+    # uv add logfire
+    # uv run logfire auth
+    # uv run logfire projects use astro-planner-project
+    #  https://logfire-us.pydantic.dev/dmccallie/astro-planner-project
+    import logfire
 
-logfire.configure()
-logfire.instrument_pydantic_ai()
-# logfire.instrument_httpx(capture_all=True)
+    logfire.configure()
+    logfire.instrument_pydantic_ai()
+    # logfire.instrument_httpx(capture_all=True)
 
 # ----------------------------- App setup -------------------------------------
 app, rt = fast_app()
 # add a static files mount for CSS, JS, images, etc
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+WIKIPEDIA_USER_AGENT = "dso_planner_fasthtml/0.1 (Wikipedia image lookup)"
 
 # ensure that every request has a session ID cookie, and that the session state is loaded/saved around the request
 # does this have performance implications? should we only do it for certain routes? for now just do it for everything except static files
@@ -67,6 +78,102 @@ async def ensure_session_middleware(req, call_next):
         return response
     ensure_session_id(req, response)
     return response
+
+
+def _dedupe_strings(values: Sequence[str | None]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(cleaned)
+    return result
+
+
+def _fetch_wikipedia_json(params: dict[str, str]) -> dict[str, Any] | None:
+    request = UrlRequest(
+        f"{WIKIPEDIA_API_URL}?{urlencode(params)}",
+        headers={
+            "User-Agent": WIKIPEDIA_USER_AGENT,
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib_urlopen(request, timeout=10) as response:
+            return json.load(response)
+    except Exception as exc:
+        print(f"Wikipedia API request failed: {exc}")
+        return None
+
+
+def _lookup_wikipedia_image(candidates: Sequence[str | None]) -> dict[str, str] | None:
+    for candidate in _dedupe_strings(candidates):
+        payload = _fetch_wikipedia_json({
+            "action": "query",
+            "format": "json",
+            "generator": "search",
+            "gsrsearch": candidate,
+            "gsrlimit": "1",
+            "prop": "pageimages|info",
+            "piprop": "original|thumbnail|name",
+            "pithumbsize": "1200",
+            "inprop": "url",
+        })
+        if not payload:
+            continue
+
+        pages = payload.get("query", {}).get("pages", {})
+        for page in pages.values():
+            image = page.get("original") or page.get("thumbnail") or {}
+            image_url = image.get("source")
+            page_url = page.get("fullurl")
+            title = page.get("title")
+            if image_url and page_url and title:
+                return {
+                    "image_url": image_url,
+                    "page_url": page_url,
+                    "title": title,
+                }
+    return None
+
+
+def _is_allowed_wiki_image_url(image_url: str) -> bool:
+    parsed = urlparse(image_url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = (parsed.netloc or "").lower()
+    return host.endswith("wikimedia.org") or host.endswith("wikipedia.org")
+
+
+def _fetch_remote_bytes(image_url: str) -> tuple[bytes, str | None]:
+    request = UrlRequest(
+        image_url,
+        headers={
+            "User-Agent": WIKIPEDIA_USER_AGENT,
+            "Accept": "image/*,*/*;q=0.8",
+        },
+    )
+    with urllib_urlopen(request, timeout=20) as response:
+        content_type = response.headers.get_content_type()
+        return response.read(), content_type
+
+
+def _convert_image_bytes_if_needed(image_url: str, image_bytes: bytes, content_type: str | None) -> tuple[bytes, str]:
+    lowered_path = urlparse(image_url).path.lower()
+    is_tiff = lowered_path.endswith((".tif", ".tiff")) or content_type in {"image/tiff", "image/tif"}
+    if not is_tiff:
+        return image_bytes, content_type or "image/jpeg"
+
+    with Image.open(BytesIO(image_bytes)) as image:
+        converted = image.convert("RGB")
+        output = BytesIO()
+        converted.save(output, format="JPEG", quality=75)
+    return output.getvalue(), "image/jpeg"
 
 # # -------------------------- Fake dataset -------------------------------------
 # SEED          = 42
@@ -394,11 +501,12 @@ def localization_bar(loc: dict, oob=False) -> FT:
     ai_text = loc.get("ai_text") or ""
     ai_query = loc.get("sql_query") or ""
 
-    return Div(id="locbar", cls="locbar",
+    return Fieldset(id="locbar", cls="locbar",
                hx_swap_oob="true" if oob else "false",
                hx_get=loc_dialog,
                hx_target="#loc-dialog-body",
                hx_swap="innerHTML")(
+        Legend("Click Box to define your Plan", cls="locbar-title"),
         Div(cls="locbar-top")(
             Div(cls="locbar-grid")(
                 Div(cls="locbar-item")(
@@ -455,9 +563,11 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
             # hx_trigger="change from:input, select, checkbox, radio, textarea",
 
         )(
-        Fieldset(
-            Legend("Filters"),
-            Div(
+        Fieldset(cls="post-query-filters")(
+            Legend("Post-query Filters"),
+
+            # row 1
+            Div(cls="filter-row") (
                 Div(Label("Search", Input(name="q", value=filters["q"], placeholder="name contains…", cls="filter-ctl"))),
                 
                 # combo select only one at a time but db expects a list, with ['all'] meaning no filtering
@@ -466,37 +576,38 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
 
                 Div(Label("Object Type", Select(name="object_type", cls="filter-ctl")( *[Option(c[1], value=c[0],
                                 selected=(filters["object_types"]==c[0])) for c in stellarium_object_types] ))),
+            ),
 
-                # Div(Label("Active", Select(name="active", cls="filter-ctl")( 
-                #     Option("Any", value="any", selected=(filters["active_sel"]=="any")),
-                #     Option("Active", value="true", selected=(filters["active_sel"]=="true")),
-                #     Option("Inactive", value="false", selected=(filters["active_sel"]=="false")),
-                # ))),
-            cls="grid")
-        ),
-        Fieldset(
-            Legend("Classes"), Div(*[classes_box(c) for c in CLASSES], cls="cats"),
-        ),
-        Fieldset(cls="actions")(
-            Legend("Filters"),
-            Div(
-                Label(Safe("Min Hours Visible"), Input(type="number", name="min_hours_viz", value=str(filters["min_hours_viz"]), style="width:fit-content",
-                                     min="0", max=MAX_HOURS_VISIBLE, step=1, cls="filter-ctl")),
-                # Label("Max"), Input(type="number", name="max_hours_viz", value=str(filters["max_hours_viz"]), min=0, max=24, step=1, cls="filter-ctl"),
-                cls="range"
+            # row 2
+            Div(cls="filter-row") (
+                Div(
+                    Label("Min FOV %", Input(type="number", name="min_coverage", value=str(filters["min_coverage"]), style="width:fit-content",
+                                        min="0", max="1000", step=10, cls="filter-ctl")),
+                    # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
+                    cls="range"
+                ),
+                Div(
+                    Label("Max FOV %", Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), style="width:fit-content",
+                                        min="0", max="1000", step=10, cls="filter-ctl")),
+                    # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
+                    cls="range"
+                ),
+                Div(
+                    Label(Safe("Min Vis"), Input(type="number", name="min_hours_viz", value=str(filters["min_hours_viz"]),
+                                        style="width:fit-content",
+                                        min="0", max=MAX_HOURS_VISIBLE, step=1, cls="filter-ctl")),
+                    # Label("Max"), Input(type="number", name="max_hours_viz", value=str(filters["max_hours_viz"]), min=0, max=24, step=1, cls="filter-ctl"),
+                    cls="range"
+                ),
             ),
-            Div(
-                Label("Min FOV %", Input(type="number", name="min_coverage", value=str(filters["min_coverage"]), style="width:fit-content",
-                                     min="0", max="1000", step=10, cls="filter-ctl")),
-                # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
-                cls="range"
+            
+            # row 3
+            Div(cls="filter-row") (
+                Fieldset(cls="")(
+                    Legend("Classes"),
+                    Div(*[classes_box(c) for c in CLASSES], cls="cats"),
+                ),
             ),
-            Div(
-                Label("Max FOV %", Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), style="width:fit-content",
-                                     min="0", max="1000", step=10, cls="filter-ctl")),
-                # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
-                cls="range"
-            )
         ),
 
         # add fields to save sort (now "sortname") and order (get persisted into localStorage by JS)
@@ -509,7 +620,7 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
         #     cls="actions",
         # )
         Div(id="button-container")(
-            Button("Apply", id="apply-filters", type="submit", hx_scroll="this"),
+            Button("Apply Filters", id="apply-filters", type="submit", hx_scroll="this"),
             Button("Reset", cls="secondary", type="button", onclick="window.location.href='/'"),
             cls="actions",
         )
@@ -725,7 +836,7 @@ COL_FIGS: list[ColumnConfig]= [
     #     renderTd_fn = lambda col, row: default_Td(col, row)
     # ),
 
-    ColumnConfig(name = "name", width = "16%", style=None, hdr_cls="wrap", cls="wrap", sortable=True, color_scale=None,
+    ColumnConfig(name = "name", width = "18%", style=None, hdr_cls="wrap", cls="wrap", sortable=True, color_scale=None,
         header_fn = lambda col, row: "Name",
         renderTd_fn = lambda col, row: nameCatTd(col, row)
     ),
@@ -735,22 +846,27 @@ COL_FIGS: list[ColumnConfig]= [
     #     renderTd_fn = lambda col, row: default_Td(col, row)
     # ),
 
-    ColumnConfig(name = "RA", width = "6%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name = "RA", width = "4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "RA",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name = "class", width = "4%", style=None, cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name = "AZI", width = "4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "AZI",
+        renderTd_fn = lambda col, row: default_Td(col, row)
+    ),
+
+    ColumnConfig(name = "class", width = "4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Class",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name = "type", width = "4%", style=None, cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name = "type", width = "4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Type",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name = "constellation_abbr", width = "4%", style=None, cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name = "constellation_abbr", width = "4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Cons",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
@@ -758,24 +874,24 @@ COL_FIGS: list[ColumnConfig]= [
     # ColumnConfig("mag", "Magnitude", "6%", None, True, None),
 
     # ColumnConfig("size", "Size", "12%", None, False, None), # nn x nn
-    ColumnConfig(name="coverage", width="4%", style=None, cls=None, sortable=True, color_scale=None,
+    ColumnConfig(name="coverage", width="4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "FOV %",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
     # earlier code used dos['rise'] but now we use dso['rise_time']
-    ColumnConfig(name="rise_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
-        header_fn = lambda col, row: "Rise",
-        renderTd_fn = lambda col, row: default_Td(col, row)
-    ),
+    # ColumnConfig(name="rise_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+    #     header_fn = lambda col, row: "Rise",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
     ColumnConfig(name="transit_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Trans",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
-    ColumnConfig(name="set_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
-        header_fn = lambda col, row: "Set",
-        renderTd_fn = lambda col, row: default_Td(col, row)
-    ),
+    # ColumnConfig(name="set_time", width="4%", style="text-align:left;", cls=None, sortable=True, color_scale=None,
+    #     header_fn = lambda col, row: "Set",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
 
     # ColumnConfig(name="score", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=CS_ALT,
     #     header_fn = lambda col, row: "SCR",
@@ -787,10 +903,10 @@ COL_FIGS: list[ColumnConfig]= [
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    ColumnConfig(name="hours_viz", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
-        header_fn = lambda col, row: "Viz",
-        renderTd_fn = lambda col, row: default_Td(col, row)
-    ),
+    # ColumnConfig(name="hours_viz", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+    #     header_fn = lambda col, row: "Viz",
+    #     renderTd_fn = lambda col, row: default_Td(col, row)
+    # ),
 
     # ColumnConfig("score", "4%", "text-align:center;", True, None,
     #     get_header=lambda row: "Score",
@@ -798,32 +914,32 @@ COL_FIGS: list[ColumnConfig]= [
 
     # # five more data / time columns algorithmically generated
 
-    ColumnConfig(name="obsTime0", width="9%", style="text-align:center;padding:2px 2px;",
+    ColumnConfig(name="obsTime0", width="8%", style="text-align:center;padding:1px 1px;",
                   cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime0_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
-    ColumnConfig(name="obsTime1", width="9%", style="text-align:center;padding:2px 2px;",
+    ColumnConfig(name="obsTime1", width="8%", style="text-align:center;padding:1px 1px;",
                   cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime1_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
-    ColumnConfig(name="obsTime2", width="9%", style="text-align:center;padding:2px 2px;",
+    ColumnConfig(name="obsTime2", width="8%", style="text-align:center;padding:1px 1px;",
                   cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime2_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
-    ColumnConfig(name="obsTime3", width="9%", style="text-align:center;padding:2px 2px;",
+    ColumnConfig(name="obsTime3", width="8%", style="text-align:center;padding:1px 1px;",
                   cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime3_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
-    ColumnConfig(name="obsTime4", width="9%", style="text-align:center;padding:2px 2px;",
+    ColumnConfig(name="obsTime4", width="8%", style="text-align:center;padding:1px 1px;",
                   cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime4_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
     ),
-    ColumnConfig(name="obsTime5", width="10%", style="text-align:center;padding:2px 2px;",
+    ColumnConfig(name="obsTime5", width="8%", style="text-align:center;padding:1px 1px;",
                   cls=None, sortable=False, color_scale=HSL_GREEN,
         header_fn = lambda c, row: extract_dt(row.get("obsTime5_dt")),
         renderTd_fn = lambda col, row: altAzi_Td(col, row)
@@ -1265,7 +1381,7 @@ def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc",
 
 
 @rt
-def detail(req, dso_id: str, localization: dict = {}) -> FT:
+async def detail(req, dso_id: str, localization: dict = {}) -> FT:
     """Simple detail page placeholder. Normal navigation (not HTMX) so the browser's
     Back button returns to the exact table state (filters/sort preserved).
 
@@ -1298,6 +1414,44 @@ def detail(req, dso_id: str, localization: dict = {}) -> FT:
         A("Open table", href=index),
         cls="backbar"
     )
+
+    ai_info = Div(
+        Div(
+            H3("AI-generated summary info about this DSO", cls="ai-info-title"),
+            P("Loaded asynchronously", cls="ai-info-kicker"),
+            cls="ai-info-header"
+        ),
+        Div(
+            Div(
+                Div(cls="spinner"),
+                Div(
+                    P("Fetching info...", cls="ai-info-status-text"),
+                    P("The detail page is ready; this summary is loading in the background.", cls="ai-info-status-note"),
+                ),
+                id="ai-info-loading",
+                cls="ai-info-loading htmx-indicator",
+                data_ai_loading="true"
+            ),
+            P(
+                "Unable to fetch AI info right now. Check your internet connection and try again.",
+                cls="ai-info-error",
+                data_ai_error="true",
+                hidden=True
+            ),
+            cls="ai-info-body"
+        ),
+        id="ai-info",
+        cls="ai-info-panel",
+        hx_get=dso_ai_info.to(dso_id=dso_id),
+        hx_trigger="load",
+        hx_swap="outerHTML",
+        hx_indicator="#ai-info-loading"
+    )
+    ai_info.attrs.update({
+        'hx-on::send-error': "const error = this.querySelector('[data-ai-error]'); if (error) { error.hidden = false; error.textContent = 'Unable to fetch AI info right now. Check your internet connection and try again.'; }",
+        'hx-on::response-error': "const error = this.querySelector('[data-ai-error]'); if (error) { error.hidden = false; error.textContent = 'The AI info request failed. Please try again in a moment.'; }"
+    })
+
 
     details = Table(cls="striped")(
         Thead(Tr(Th("Field"), Th("Value"))),
@@ -1365,12 +1519,151 @@ def detail(req, dso_id: str, localization: dict = {}) -> FT:
     return Titled(
         f"Details for ID {row['name']} (id:{dso_id})",
         # add css
-        Link(rel="stylesheet", href="/static/app.css?v=3"),
+        Link(rel="stylesheet", href="/static/app.css?v=4"),
+        MarkdownJS(sel=".ai-info-markdown"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"),
         Script(src="https://cdnjs.cloudflare.com/ajax/libs/suncalc/1.9.0/suncalc.min.js"),
         Script(src="/static/scripts.js?v=5", type="module", defer=True),
 
-        Div(backbar, details, ra_dec_d3, dso_moon_d3, cls="container")
+        Div(backbar, ai_info, details, ra_dec_d3, dso_moon_d3, cls="container")
+    )
+
+
+@rt('/detail/{dso_id}/ai-info')
+async def dso_ai_info(dso_id: str) -> FT:
+    row = load_dso_by_id(dso_id, db_path)
+    if not row:
+        return Div(
+            Div(
+                H3(f"AI-generated summary info", cls="ai-info-title"),
+                # P("Loaded asynchronously", cls="ai-info-kicker"),
+                cls="ai-info-header"
+            ),
+            Div(
+                P("No record with that id."),
+                cls="ai-info-body"
+            ),
+            id="ai-info",
+            cls="ai-info-panel"
+        )
+
+    obj_name = f"{row['name']} {row['catalog'] or ''}".strip()
+    user_query = DSOInfoQuery(text=obj_name)
+    wiki_title = ""
+
+    try:
+        info_result = await dso_info_agent.run(user_query.text)
+        # print(f"DSO Info Agent returned: {info_result}")
+        if isinstance(info_result.output, DSOInfo):
+            summary = Div(info_result.output.text, cls="ai-info-markdown")
+            wiki_title = info_result.output.wikipedia_title or ""
+        else:
+            summary = P("Sorry, no AI info available for this object.")
+    except Exception as exc:
+        print(f"DSO Info Agent failed for {dso_id}: {exc}")
+        summary = P("Sorry, no AI info available for this object.")
+
+    image_slot = Div(
+        Div(cls="spinner"),
+        P("Looking for a Wikipedia image...", cls="ai-info-image-status"),
+        id="ai-info-image",
+        cls="ai-info-image-slot",
+        hx_get=dso_ai_image.to(dso_id=dso_id, wiki_title=wiki_title),
+        hx_trigger="load",
+        hx_swap="outerHTML"
+    )
+
+    return Div(
+        Div(
+            H3(f"AI-generated summary info for {obj_name}", cls="ai-info-title"),
+            # P("Loaded asynchronously", cls="ai-info-kicker"),
+            cls="ai-info-header"
+        ),
+        Div(summary, image_slot, cls="ai-info-body"),
+        id="ai-info",
+        cls="ai-info-panel"
+    )
+
+
+@rt('/detail/{dso_id}/ai-image')
+async def dso_ai_image(dso_id: str, wiki_title: str = ""):
+    row = load_dso_by_id(dso_id, db_path)
+    if not row:
+        return ""
+
+    obj_name = f"{row['name']} {row['catalog'] or ''}".strip()
+    image_info = await asyncio.to_thread(
+        _lookup_wikipedia_image,
+        [
+            wiki_title,
+            obj_name,
+            row.get("name"),
+            row.get("catalog"),
+            f'"{row.get("name") or ""}" astronomy',
+            f'"{row.get("catalog") or ""}" astronomy',
+        ]
+    )
+    if not image_info:
+        return ""
+
+    return Div(
+        H4("Wikipedia image", cls="ai-info-image-title"),
+        Figure(
+            A(
+                Img(
+                    src=dso_ai_image_proxy.to(dso_id=dso_id, image_url=image_info["image_url"]),
+                    alt=f"Wikipedia image for {obj_name}",
+                    loading="lazy",
+                    cls="ai-info-image"
+                ),
+                href=image_info["image_url"],
+                target="_blank",
+                rel="noopener noreferrer"
+            ),
+            Figcaption(
+                A(
+                    "Open full image",
+                    href=image_info["image_url"],
+                    target="_blank",
+                    rel="noopener noreferrer"
+                ),
+                Span(" · "),
+                A(
+                    f"Wikipedia: {image_info['title']}",
+                    href=image_info["page_url"],
+                    target="_blank",
+                    rel="noopener noreferrer"
+                ),
+                cls="ai-info-image-links"
+            ),
+            cls="ai-info-image-figure"
+        ),
+        id="ai-info-image",
+        cls="ai-info-image-block"
+    )
+
+
+@rt('/detail/{dso_id}/ai-image-proxy')
+async def dso_ai_image_proxy(dso_id: str, image_url: str = ""):
+    if not image_url or not _is_allowed_wiki_image_url(image_url):
+        return Response(status_code=404)
+
+    try:
+        image_bytes, content_type = await asyncio.to_thread(_fetch_remote_bytes, image_url)
+        output_bytes, output_type = await asyncio.to_thread(
+            _convert_image_bytes_if_needed,
+            image_url,
+            image_bytes,
+            content_type,
+        )
+    except Exception as exc:
+        print(f"Wikipedia image proxy failed for {dso_id}: {exc}")
+        return Response(status_code=502)
+
+    return Response(
+        content=output_bytes,
+        media_type=output_type,
+        headers={"Cache-Control": "public, max-age=86400"},
     )
 
 ## routines for showing d3 RA/Dec chart in detail page
@@ -1446,7 +1739,7 @@ def get_dso_moon_chart_data(dso_id: str, lat: float, lon: float, elevation: floa
                                                 sample_hour=21, tz=tz)
     if not dso_moon_data:
         raise ValueError("DSO moon data not found")
-    print(f"Ready to return moon chart data {dso_moon_data}")
+    # print(f"Ready to return moon chart data {dso_moon_data}")
     return dso_moon_data
 
 @rt('/nonexistent') # dummy endpoint for hx-get in detail page
@@ -1454,18 +1747,6 @@ def do_nothing():
     """This endpoint does nothing; it's just a placeholder for hx-get in the detail page."""
     print("Called /nonexistent endpoint - doing nothing")
     return ""
-
-####
-# Celestial "sky map" stuff from Claude
-# @app.get("/")
-# def home():
-#     return Html(
-#         Head(Title("Astronomy Tools")),
-#         Body(
-#             H1("Astronomy Tools"),
-#             A("Open Sky Map", href="/sky-map", target="_blank"),
-#         )
-#     )
 
 @app.get("/sky-map")
 def sky_map_page():

@@ -1,6 +1,7 @@
 /* some overrides */
 :root {
-  --pico-line-height: 1.1; 
+  --pico-line-height: 1.0; 
+  --pico-font-size: 1rem;
 }
 
 /* Layout */
@@ -8,8 +9,36 @@
 .grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:.75rem; }
 fieldset { border:1px solid gray; padding:.4rem; border-radius:.3rem; }
 .cats { display:flex; gap:1rem; flex-wrap:wrap; }
-.range { display:flex; align-items:center; gap:.5rem; }
+.range { display:inline-block; vertical-align: middle; align-items:center; gap:.5rem; }
 .actions { display:flex; gap:3.0rem; }
+.post-query-filters {
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+}
+.post-query-filters > .filter-row {
+  display: block;
+  width: 100%;
+}
+.post-query-filters > .filter-row:nth-of-type(1),
+.post-query-filters > .filter-row:nth-of-type(2) {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .75rem;
+  align-items: start;
+}
+.post-query-filters > .filter-row:nth-of-type(1) > div,
+.post-query-filters > .filter-row:nth-of-type(2) > div {
+  min-width: 0;
+}
+.post-query-filters > .filter-row:nth-of-type(2) > .range {
+  display: block;
+}
+.post-query-filters > .filter-row:nth-of-type(1) .filter-ctl,
+.post-query-filters > .filter-row:nth-of-type(2) .filter-ctl {
+  width: 100%;
+  box-sizing: border-box;
+}
 .end-of-results td { color: var(--muted-color); }
 
 /* top localization banner */
@@ -24,6 +53,11 @@ fieldset { border:1px solid gray; padding:.4rem; border-radius:.3rem; }
   border-radius: .35rem;
   cursor: pointer;
 }
+.legend {
+  padding: 0 .35rem;
+  font-weight: 600;
+}
+
 .locbar-top {
   width: 100%;
   display: flex;
@@ -84,7 +118,6 @@ table.striped tbody tr:nth-child(odd){ background:rgba(127,127,127,.05); }
 /* need more experiments with this - applies to TH with multi-line headers */
 .nowrap { white-space:nowrap; }
 .wrap { white-space:normal; }
-
 
 table.striped tbody td, th {
   border: 1px solid #eee;      /* faint gray lines */
@@ -221,6 +254,10 @@ dialog.modal .footer {
 
 /* Mobile: stack the form fields */
 @media (max-width: 640px) {
+  .post-query-filters > .filter-row:nth-of-type(1),
+  .post-query-filters > .filter-row:nth-of-type(2) {
+    grid-template-columns: 1fr;
+  }
   dialog.modal { width: 100vw !important; max-width: 100vw; border-radius: 0; }
   dialog.modal .grid2 { grid-template-columns: 1fr; }
   dialog.modal .loc-grid { grid-template-columns: 1fr; }
@@ -232,6 +269,204 @@ dialog.modal .footer {
   .locbar-grid {
     grid-template-columns: 1fr;
   }
+
+  .ai-info-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .ai-info-body {
+    padding: .95rem 1rem 1rem;
+  }
+}
+
+/* AI detail summary panel */
+.ai-info-panel {
+  border: 1px solid #2d4758;
+  border-left: 5px solid #7cb2cf;
+  border-radius: .7rem;
+  background: linear-gradient(180deg, #142330 0%, #0e1b26 100%);
+  overflow: hidden;
+}
+
+.ai-info-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: .9rem 1.1rem .55rem;
+  background: rgba(124, 178, 207, 0.08);
+  border-bottom: 1px solid rgba(124, 178, 207, 0.18);
+}
+
+.ai-info-title {
+  margin: 0;
+  font-size: 1.05rem;
+  color: #eef6fb;
+}
+
+.ai-info-kicker {
+  margin: 0;
+  color: #9cc2d7;
+  font-size: .82rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  white-space: nowrap;
+}
+
+.ai-info-body {
+  padding: 1rem 1.25rem 1.15rem;
+}
+
+.ai-info-body > * {
+  max-width: 72ch;
+}
+
+.ai-info-body p {
+  margin: 0 0 .8rem;
+  line-height: 1.45;
+  color: #d7e7f1;
+}
+
+.ai-info-body p:last-child {
+  margin-bottom: 0;
+}
+
+.ai-info-markdown {
+  max-width: 72ch;
+}
+
+.ai-info-markdown > :first-child {
+  margin-top: 0;
+}
+
+.ai-info-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.ai-info-markdown p,
+.ai-info-markdown li,
+.ai-info-markdown blockquote {
+  color: #d7e7f1;
+  line-height: 1.5;
+}
+
+.ai-info-markdown h1,
+.ai-info-markdown h2,
+.ai-info-markdown h3,
+.ai-info-markdown h4 {
+  color: #eef6fb;
+  margin: 0 0 .7rem;
+}
+
+.ai-info-markdown ul,
+.ai-info-markdown ol {
+  margin: 0 0 .9rem 1.2rem;
+}
+
+.ai-info-markdown code {
+  color: #f3fbff;
+  background: rgba(156, 194, 215, 0.14);
+  padding: .1rem .3rem;
+  border-radius: .25rem;
+}
+
+.ai-info-loading {
+  display: flex;
+  align-items: center;
+  gap: .85rem;
+  color: #d7e7f1;
+}
+
+.ai-info-loading .spinner {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border: 3px solid rgba(156, 194, 215, 0.24);
+  border-top-color: #9cc2d7;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+.ai-info-status-text {
+  font-weight: 600;
+  color: #eef6fb;
+}
+
+.ai-info-status-note {
+  color: #a8c3d3;
+  font-size: .94rem;
+}
+
+.ai-info-error {
+  margin-top: .85rem;
+  padding: .8rem .95rem;
+  border: 1px solid #d8b38a;
+  border-radius: .55rem;
+  background: #fff6eb;
+  color: #7c4d1f;
+}
+
+.ai-info-image-slot {
+  display: flex;
+  align-items: center;
+  gap: .7rem;
+  margin-top: 1rem;
+  padding-top: .9rem;
+  border-top: 1px solid rgba(156, 194, 215, 0.18);
+  color: #a8c3d3;
+}
+
+.ai-info-image-slot .spinner {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 3px solid rgba(156, 194, 215, 0.2);
+  border-top-color: #9cc2d7;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+.ai-info-image-status {
+  margin: 0;
+  color: #a8c3d3;
+}
+
+.ai-info-image-block {
+  margin-top: 1rem;
+  padding-top: .95rem;
+  border-top: 1px solid rgba(156, 194, 215, 0.18);
+}
+
+.ai-info-image-title {
+  margin: 0 0 .7rem;
+  color: #eef6fb;
+  font-size: .98rem;
+}
+
+.ai-info-image-figure {
+  margin: 0;
+}
+
+.ai-info-image {
+  display: block;
+  width: 100%;
+  max-width: 720px;
+  max-height: 420px;
+  object-fit: cover;
+  border-radius: .55rem;
+  border: 1px solid rgba(156, 194, 215, 0.22);
+  background: #0a141c;
+}
+
+.ai-info-image-links {
+  margin-top: .55rem;
+  color: #a8c3d3;
+  font-size: .92rem;
+}
+
+.ai-info-image-links a {
+  color: #9cc2d7;
 }
 
 /* dso alitude graph and moon illum charts */
