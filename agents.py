@@ -20,8 +20,6 @@ from astronomy_utils import ai_localize_dso, ai_convert_utc_iso_to_local
 
 dotenv.load_dotenv()
 
-# db_path = Path("./dso_data.db")
-
 ### QUALIIFYING DSO TOOL ###
 
 single_agent_astro_plan = Agent(

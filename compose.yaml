@@ -11,7 +11,7 @@ services:
     ports:
       - "5010:5010"
     volumes:
-      - ./dso_data.db:/app/dso_data.db
+      - ./runtime:/app/runtime
     restart: unless-stopped
 
 networks:

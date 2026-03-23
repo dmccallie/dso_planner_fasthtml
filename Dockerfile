@@ -16,6 +16,5 @@ COPY . .
 
 EXPOSE 5010
 
-# run with uvicorn for better performance in production, but allow running with serve() for local debugging
 ENV PATH="/app/.venv/bin:$PATH"
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5010"]
+CMD [".venv/bin/python", "entrypoint.py"]

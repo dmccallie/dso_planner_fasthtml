@@ -183,13 +183,13 @@ CLASSES    =  [('Cls', 'Cluster'), ('DS', 'Double Star'), ('Gal', 'Galaxy'), ('N
 REGIONS       = ["All", "North", "South", "East", "West"]
 MAX_HOURS_VISIBLE = 6  # max for hours visible filter FIXME for whole night?
 
-db_path = Path("./dso_data.db")
+DB_PATH = Path("./runtime/dso_data.db")
 
 SESSION_COOKIE_NAME = "astro_session_id"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 
 def _session_db():
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -316,10 +316,10 @@ def get_sensor_coverage(dso_min_axis: float, dso_maj_axis: float,
     else:
         return 0
 
-dso_classes = get_unique_classes(db_path=db_path)
+dso_classes = get_unique_classes(db_path=DB_PATH)
 print(f"Unique DSO classes: {dso_classes}")
 # gets pairs of (abbr, full name)
-dso_constellation_name_pairs = [("all", "All Constellations")] + get_unique_constellations(db_path=db_path)
+dso_constellation_name_pairs = [("all", "All Constellations")] + get_unique_constellations(db_path=DB_PATH)
 print(f"Unique DSO constellation abbreviations: {dso_constellation_name_pairs}")
 ensure_session_table()
 
@@ -1258,13 +1258,9 @@ def table(req, sortname: str = "dd_dec", order: str = "asc", update_localization
     filters = filters_override or get_filters(req)
     localization = localization_override or get_loc(req)
     
-    # print(f"---->>>>loading raw data for /table with sortname:{sortname}, order:{order}")
-    # raw_data = load_filter_localize_data(db_path, filters, localization, sortname, order)
-    
-    # debug test for now
     session_id = ensure_session_id(req)
     assert session_id is not None, "Session ID should not be None in /rows route"
-    raw_data = load_localize_filter_expand_sort_dso_data(session_id, db_path, filters, localization, sortname, order)
+    raw_data = load_localize_filter_expand_sort_dso_data(session_id, DB_PATH, filters, localization, sortname, order)
     print(f"Test load_localize_filter_expand_sort_dso_data returned {len(raw_data)} rows for session {session_id}")
 
     trs = rows(req, page=1, sortname=sortname, order=order, raw_data=raw_data, localization=localization)  # call the route function directly to get first page
@@ -1349,7 +1345,7 @@ def rows(req, page: int = 2, sortname: str = "dso_id", order: str = "asc",
         filters2     = get_filters(req)
         localization = get_loc(req) 
         assert session_id is not None, "Session ID should not be None in /rows route"
-        sorted_rows = load_localize_filter_expand_sort_dso_data(session_id, db_path, filters2, localization, sortname, order)
+        sorted_rows = load_localize_filter_expand_sort_dso_data(session_id, DB_PATH, filters2, localization, sortname, order)
         print(f"Test load_localize_filter_expand_sort_dso_data returned {len(sorted_rows)} rows for session {session_id}")
 
     # debug test for now
@@ -1392,7 +1388,7 @@ async def detail(req, dso_id: str, localization: dict = {}) -> FT:
     print(f"Detail page request for dso_id={dso_id}, loc={localization}") # fastHTML auto unpacks into dict!
     print(f"Detail request query params: {req.query_params}") # this works as well as the localization dict
     
-    row = load_dso_by_id(dso_id, db_path)
+    row = load_dso_by_id(dso_id, DB_PATH)
     if not row:
         return Titled("Not Found", P("No record with that id."))
 
@@ -1531,7 +1527,7 @@ async def detail(req, dso_id: str, localization: dict = {}) -> FT:
 
 @rt('/detail/{dso_id}/ai-info')
 async def dso_ai_info(dso_id: str) -> FT:
-    row = load_dso_by_id(dso_id, db_path)
+    row = load_dso_by_id(dso_id, DB_PATH)
     if not row:
         return Div(
             Div(
@@ -1587,7 +1583,7 @@ async def dso_ai_info(dso_id: str) -> FT:
 
 @rt('/detail/{dso_id}/ai-image')
 async def dso_ai_image(dso_id: str, wiki_title: str = ""):
-    row = load_dso_by_id(dso_id, db_path)
+    row = load_dso_by_id(dso_id, DB_PATH)
     if not row:
         return ""
 
@@ -1690,7 +1686,7 @@ def get_dso_positions(dso_id: str,
         obs_date = datetime.now(ZoneInfo(tz))
     
     # fetch dso data
-    dso_data = load_dso_by_id(dso_id, db_path=Path("./dso_data.db"))
+    dso_data = load_dso_by_id(dso_id, db_path=DB_PATH)
     if not dso_data:
         raise ValueError("DSO not found")
 
@@ -1721,7 +1717,7 @@ def get_dso_moon_chart_data(dso_id: str, lat: float, lon: float, elevation: floa
     API endpoint that returns JSON data for the DSO moon chart
     """
     # fetch dso data
-    dso_data = load_dso_by_id(dso_id, db_path=Path("./dso_data.db"))
+    dso_data = load_dso_by_id(dso_id, db_path=DB_PATH)
     if not dso_data:
         raise ValueError("DSO not found")
 

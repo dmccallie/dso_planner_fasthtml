@@ -7,6 +7,8 @@
 
     Updated Sep2025 for conversion to FastHTML version
 
+    Major refactoring 3/2026 for dso_planner_fasthtml, Dockerize, etc
+
 """
 import sqlite3
 import csv
@@ -720,6 +722,10 @@ def get_size_string(maj_axis: str, min_axis: str) -> str:
     return str(maj_axis_s)
 
 def dump_good_stuff_as_json(conn, output_filename, double_stars_filename, sqlite_dso_db_filename: str = ""):
+    # 3/2026 refactor stuff for dso_planner_fasthtml
+    # don't write JSON unless output_filename is specified.
+
+    # pre dso_planner comments below.
     #new version that removes complexity from SQL and does post-dso-fetch query for names and catalog ids
     #I'm sure that SQL could do all this, but I couldn't get it right
     # dump as JSON with names for DSO_APP
@@ -810,18 +816,19 @@ def dump_good_stuff_as_json(conn, output_filename, double_stars_filename, sqlite
         dso['size'] = get_size_string(dso['maj_axis'], dso['min_axis'])
 
     # create json file
-    with open(output_filename, 'w') as fp:
-        json.dump(raw_data, fp)
+    if output_filename:
+        with open(output_filename, 'w') as fp:
+            json.dump(raw_data, fp)
 
     # if sqlite_dso_db_filename is not empty, also create new db and add the denormalized data there
+    # NOTE that this db file is not the same as the "staging" db.
+
     if sqlite_dso_db_filename:
         create_dso_table_insert_data(sqlite_dso_db_filename, raw_data)
 
     return
 
-
-if __name__ == "__main__":
-
+def create_dso_planner_db():
     #13Apr2022 - added "search" column to csv output, to facilitate Sheet's Validate lookup tool
     #10Mar2023 - added json output for DSO_APP
 
@@ -830,19 +837,24 @@ if __name__ == "__main__":
     import os    
     print("current directory = ", os.getcwd()) #/home/david/node_projects/dso_planner
 
-    DB_NAME = './data_extraction/stellarium_data/staging.db'
-    conn = sqlite3.connect(DB_NAME)
+    # this is the temporary staging DB file
+    STAGING_DB_NAME = './data_extraction/stellarium_data/staging.db'
 
     catalog_filename = "./data_extraction/stellarium_data/catalog.txt"
     names_filename = "./data_extraction/stellarium_data//names.dat"
-    csv_output_filename = "./data_extraction/python/test_out_w_search.csv"
-    json_output_filename = "./data_extraction/python/raw_json_out.json"
     csv_double_stars_filename = "./data_extraction/stellarium_data/double_stars.csv"
 
-    # create sqlite for denormalized data to drive new web page
-    sqlite_dso_db_filename = "./dso_data.db"
+    json_output_filename = None # "./data_extraction/python/raw_json_out.json"
+    
+    # This is the file that will be used by dso_planner_fasthtml 
+    # this ought to come from a config file
+    dso_planner_db_filename = "./runtime/dso_data.db"
 
-    with conn:
+    # make sure any directories are created for dso_planner_db_filename
+    if dso_planner_db_filename:
+        os.makedirs(os.path.dirname(dso_planner_db_filename), exist_ok=True)    
+    
+    with sqlite3.connect(STAGING_DB_NAME) as conn:
         try:
             create_tables(conn)
 
@@ -855,6 +867,14 @@ if __name__ == "__main__":
         
         # dump_test(conn)
         #conn.set_trace_callback(print)
-        dump_good_stuff_as_json(conn, json_output_filename, csv_double_stars_filename, sqlite_dso_db_filename)
+        dump_good_stuff_as_json(conn, json_output_filename, csv_double_stars_filename, dso_planner_db_filename)
 
-    print("done")
+    # delete temp staging db file - we don't need it anymore
+    if os.path.exists(STAGING_DB_NAME):
+        os.remove(STAGING_DB_NAME)
+
+    print("created dso_planner_db_filename = ", dso_planner_db_filename)
+
+if __name__ == "__main__":
+    create_dso_planner_db()
+
