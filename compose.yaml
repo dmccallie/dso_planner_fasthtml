@@ -6,6 +6,7 @@ services:
     # can set APP_IMAGE in .env to override the default image for local development or testing (e.g.V1.2.3)
     # to avoid local override build, use docker compose -f compose.yaml up -d --build
     image: ${APP_IMAGE:-ghcr.io/dmccallie/dso_planner_fasthtml:latest}
+    container_name: dso-planner-fasthtml
     env_file:
       - .env
     ports:
@@ -13,6 +14,8 @@ services:
     volumes:
       - ./runtime:/app/runtime
     restart: unless-stopped
+    networks:
+      - web
 
 networks:
   web:
