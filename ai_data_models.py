@@ -63,7 +63,7 @@ class Camera(BaseModel):
 
 class Telescope(BaseModel):
     name: str
-    focal_length_mm: PositiveFloat
+    focal_length_mm: int = Field(..., description="The focal length of the telescope in millimeters")
     f_ratio: PositiveFloat
 
 class Equipment(BaseModel):

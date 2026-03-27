@@ -1,5 +1,4 @@
 name: dso-planner-fasthtml
-version: 0.1.0
 
 services:
   app:
@@ -12,7 +11,8 @@ services:
     ports:
       - "5010:5010"
     volumes:
-      - ./runtime:/app/runtime
+      # lets make this named, so not exposed to host, since it makes local testing harder when created by container 
+      - runtime-data:/app/runtime
     restart: unless-stopped
     networks:
       - web
@@ -20,3 +20,6 @@ services:
 networks:
   web:
     external: true
+
+volumes:
+  runtime-data:

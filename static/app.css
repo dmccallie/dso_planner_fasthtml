@@ -8,14 +8,30 @@
 .container { display:flex; flex-direction:column; gap:1rem; }
 .grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:.75rem; }
 fieldset { border:1px solid gray; padding:.4rem; border-radius:.3rem; }
-.cats { display:flex; gap:1rem; flex-wrap:wrap; }
+.cats { display:flex; gap:2rem; flex-wrap:wrap; }
 .range { display:inline-block; vertical-align: middle; align-items:center; gap:.5rem; }
 .actions { display:flex; gap:3.0rem; }
 .post-query-filters {
   display: flex;
   flex-direction: column;
-  gap: .6rem;
+  gap: .35rem;
 }
+.post-query-filters fieldset {
+  padding: .3rem .45rem;
+}
+.post-query-filters legend {
+  margin-bottom: .15rem;
+}
+.post-query-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+  margin-bottom: 0;
+}
+.post-query-filters input:not([type="checkbox"]) {
+  margin-bottom: 10px;
+}
+
 .post-query-filters > .filter-row {
   display: block;
   width: 100%;
@@ -24,7 +40,7 @@ fieldset { border:1px solid gray; padding:.4rem; border-radius:.3rem; }
 .post-query-filters > .filter-row:nth-of-type(2) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: .75rem;
+  gap: .5rem .6rem;
   align-items: start;
 }
 .post-query-filters > .filter-row:nth-of-type(1) > div,
@@ -38,6 +54,19 @@ fieldset { border:1px solid gray; padding:.4rem; border-radius:.3rem; }
 .post-query-filters > .filter-row:nth-of-type(2) .filter-ctl {
   width: 100%;
   box-sizing: border-box;
+}
+.post-query-filters > .filter-row.actions-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: .5rem .6rem;
+  align-items: center;
+}
+.post-query-filters .classes-fieldset {
+  min-width: 0;
+}
+.post-query-filters .filter-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 .end-of-results td { color: var(--muted-color); }
 
@@ -192,6 +221,9 @@ dialog.modal .loc-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: .6rem .9rem;
+}
+dialog.modal .loc-fields:has(> :nth-child(2):last-child) {
+  grid-template-columns: 1fr;
 }
 dialog.modal .loc-ai {
   grid-column: 1 / -1;

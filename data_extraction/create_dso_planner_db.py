@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass
 import json
 
+from pathlib import Path
+
 """
 //convert RA degrees to h:m:s
 function degree2HMS(degrees) {
@@ -658,6 +660,7 @@ def classify_dso_type(obj_type: str) -> str:
 def create_dso_table_insert_data(sqlite_dso_db_filename, raw_data:list[dict]):
     # create the SQLite database and table
     # always creates a new table
+    print(f"Creating new SQLite DB for DSO data at {sqlite_dso_db_filename}")
     conn = sqlite3.connect(sqlite_dso_db_filename)
     cursor = conn.cursor()
     cursor.execute('''
@@ -823,12 +826,12 @@ def dump_good_stuff_as_json(conn, output_filename, double_stars_filename, sqlite
     # if sqlite_dso_db_filename is not empty, also create new db and add the denormalized data there
     # NOTE that this db file is not the same as the "staging" db.
 
-    if sqlite_dso_db_filename:
-        create_dso_table_insert_data(sqlite_dso_db_filename, raw_data)
+    assert sqlite_dso_db_filename != "", "sqlite_dso_db_filename is missing!"
+    create_dso_table_insert_data(sqlite_dso_db_filename, raw_data)
 
     return
 
-def create_dso_planner_db():
+def create_dso_planner_db(dso_planner_db_filename: str = ""):
     #13Apr2022 - added "search" column to csv output, to facilitate Sheet's Validate lookup tool
     #10Mar2023 - added json output for DSO_APP
 
@@ -848,9 +851,10 @@ def create_dso_planner_db():
     
     # This is the file that will be used by dso_planner_fasthtml 
     # this ought to come from a config file
-    dso_planner_db_filename = "./runtime/dso_data.db"
+    # dso_planner_db_filename = "./runtime/dso_data.db"
 
     # make sure any directories are created for dso_planner_db_filename
+    assert dso_planner_db_filename != "", "dso_planner_db_filename is missing!"
     if dso_planner_db_filename:
         os.makedirs(os.path.dirname(dso_planner_db_filename), exist_ok=True)    
     
@@ -876,5 +880,7 @@ def create_dso_planner_db():
     print("created dso_planner_db_filename = ", dso_planner_db_filename)
 
 if __name__ == "__main__":
-    create_dso_planner_db()
+    # running locally, just set dso_planner_db_filename here
+    dso_planner_db_filename = "./runtime/dso_data.db"
+    create_dso_planner_db(dso_planner_db_filename)
 

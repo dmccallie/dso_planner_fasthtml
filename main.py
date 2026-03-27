@@ -273,12 +273,12 @@ def default_loc() -> dict:
         date=date.today().isoformat(),
         hours_start="20:00",  # 8PM local time default start
         hours_end="",
-        scope_name="",
-        fl_mm=0,
-        camera_name="",
-        px_um=0.0,
-        rows=0,
-        cols=0,
+        scope_name="Ruisinger",
+        fl_mm=3770,
+        camera_name="ZWO ASI 2600 MC",
+        px_um=3.76,
+        rows=4176,
+        cols=6248,
         site_name="Powell Observatory",
         elevation=300.0,
         timezone= DEFAULT_TIMEZONE,
@@ -485,7 +485,7 @@ def localization_bar(loc: dict, oob=False) -> FT:
 
     hours_start = loc.get("hours_start")
     timezone = loc.get("timezone")
-    fl_mm = float(loc.get("fl_mm") or 0.0) 
+    fl_mm = int(loc.get("fl_mm") or 0) 
     rows = int(loc.get("rows") or 0)
     cols = int(loc.get("cols") or 0)
     px_um = float(loc.get("px_um") or 0.0)
@@ -560,7 +560,11 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
             hx_target="#table", # was "#content",  # was #table now includes filter and table
             hx_swap="outerHTML",
             hx_push_url="true",
-            # hx_trigger="change from:input, select, checkbox, radio, textarea",
+            hx_trigger=(
+                "input changed delay:500ms from:input, "
+                "change delay:300ms from:select, "
+                "change delay:200ms from:input[type=checkbox]"
+            ),
 
         )(
         Fieldset(cls="post-query-filters")(
@@ -588,12 +592,12 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
                 ),
                 Div(
                     Label("Max FOV %", Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), style="width:fit-content",
-                                        min="0", max="1000", step=10, cls="filter-ctl")),
+                                        min="0", max="1000", step=50,cls="filter-ctl")),
                     # Label("Max"), Input(type="number", name="max_coverage", value=str(filters["max_coverage"]), min=0, max=24, step=1, cls="filter-ctl"),
                     cls="range"
                 ),
                 Div(
-                    Label(Safe("Min Vis"), Input(type="number", name="min_hours_viz", value=str(filters["min_hours_viz"]),
+                    Label(Safe("Min Hours Vis"), Input(type="number", name="min_hours_viz", value=str(filters["min_hours_viz"]),
                                         style="width:fit-content",
                                         min="0", max=MAX_HOURS_VISIBLE, step=1, cls="filter-ctl")),
                     # Label("Max"), Input(type="number", name="max_hours_viz", value=str(filters["max_hours_viz"]), min=0, max=24, step=1, cls="filter-ctl"),
@@ -602,10 +606,13 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
             ),
             
             # row 3
-            Div(cls="filter-row") (
-                Fieldset(cls="")(
+            Div(cls="filter-row actions-row") (
+                Fieldset(cls="classes-fieldset")(
                     Legend("Classes"),
                     Div(*[classes_box(c) for c in CLASSES], cls="cats"),
+                ),
+                Div(cls="filter-actions")(
+                    Button("Reset", cls="secondary", type="button", onclick="window.location.href='/'"),
                 ),
             ),
         ),
@@ -619,11 +626,7 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
         #     A("Reset", href=index, cls="secondary"),
         #     cls="actions",
         # )
-        Div(id="button-container")(
-            Button("Apply Filters", id="apply-filters", type="submit", hx_scroll="this"),
-            Button("Reset", cls="secondary", type="button", onclick="window.location.href='/'"),
-            cls="actions",
-        )
+        Div(id="button-container", hidden=True)
     )
 
 def loc_form(loc: dict) -> FT:
@@ -643,7 +646,7 @@ def loc_form(loc: dict) -> FT:
                     Label("Latitude",    Input(name="lat", value=loc.get("lat") or "")),
                     Label("Longitude",   Input(name="lon", value=loc.get("lon") or "")),
                     Label("Elevation (m)", Input(name="elevation", value=loc.get("elevation") or "")),
-                    Label("Time zone",   Select(name="timezone")(
+                    Label("Time zone",   Select(name="timezone", style={"width":"fit-content"})(
                         Option("UTC", value="UTC", selected=(loc.get("timezone")=="UTC")),
                         # Option("Local (auto-detect)", value="local", selected=(loc.get("timezone")=="local")),
                         Option("America/New_York", value="America/New_York", selected=(loc.get("timezone")=="America/New_York")),

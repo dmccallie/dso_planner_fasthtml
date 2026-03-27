@@ -32,7 +32,7 @@ def ensure_runtime_db() -> None:
         return
 
     print(f"Initializing runtime DSO database at {RUNTIME_DB_PATH}")
-    create_dso_planner_db()
+    create_dso_planner_db(str(RUNTIME_DB_PATH))
 
     if not db_is_initialized(RUNTIME_DB_PATH):
         raise RuntimeError(f"Database initialization did not produce a usable DB at {RUNTIME_DB_PATH}")
