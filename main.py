@@ -1069,8 +1069,8 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
         default_date=datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d"),
         default_timezone="America/Chicago",
         default_location="Powell Observatory, Kansas", # this should be findable 
-        default_telescope="Astrophysics 130EDF F6.3",
-        default_camera="ZWO ASI 2600MC Pro",
+        default_telescope="Ruisinger",
+        default_camera="ZWO ASI 2600MC",
         default_min_altitude=20.0,
         default_max_altitude=90.0,
     )
@@ -1100,8 +1100,9 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
     user_query = loc['ai_text']
 
     if not user_query:
-        print("No User AI query provided, skipping AI Agent and returning original loc with dummy SQL")
-        return {**loc, 'sql_query': "SELECT * FROM dso_localized WHERE 1=1"}
+        print("No User AI query provided, just querying with defaults")
+        user_query = "Observe"
+        # return {**loc, 'sql_query': "SELECT * FROM dso_localized WHERE 1=1"}
     
     result = await single_agent_astro_plan.run(user_query, deps=updated_deps)
     ai_query = "" # the query we use to filter Dso, with or without AI help
@@ -1193,10 +1194,8 @@ async def save_loc(req):
 async def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
     # note index handles http initial load as well as htmx table update
 
-    # await async_func(42)  # just testing that async works in FastHTML routes
-
-    # get localization from hidden fields in query request
-    loc = get_loc(req)  # TODO: cookie fallback
+    # get localization from hidden fields in query request (or defaults)
+    loc = get_loc(req)
     
     # get filters from query params
     filters = get_filters(req)
