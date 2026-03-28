@@ -12,7 +12,7 @@ from random import random
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from astronomy_utils import ai_localize_dso, calculate_pixel_scale, calculate_rise_transit_set_fast, calculate_sensor_fov_amin, find_all_twilight_times, get_sensor_coverage, ra_dec_to_altaz_airmass_multiple_times
+from astronomy_utils import ai_localize_dso, calculate_pixel_scale, calculate_rise_transit_set_fast, calculate_sensor_fov_amin, find_all_twilight_times, get_sensor_coverage, ra_dec_to_altaz_airmass_multiple_times, score_observation_target
 
 from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR
 
@@ -369,6 +369,14 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
             dso['AZI'] = "---"
             dso['AZI_sort'] = float('inf') # sort to end if no azimuth value
 
+        # add in a score, using first hour's data
+        if results[0] is not None and isinstance(results[0]['airmass'], float) \
+                and isinstance(dso['vis_mag'], float) and isinstance(dso['coverage'], (int, float)):
+            score = score_observation_target(results[0]['airmass'], dso['vis_mag'], dso['coverage'])
+            dso['score'] = score
+        else:
+            dso['score'] = 0   
+
         # print(f"distance check: distance = {dso.get('angular_distance_deg', 'n/a')} for DSO {dso['name']} with altitudes {[dso[f'obsTime{i}_alt'] for i in range(0, NUMBER_OBS_TIMES)]} and airmasses {[results[i]['airmass'] if results[i] is not None else 'n/a' for i in range(0, NUMBER_OBS_TIMES)]} and hours_viz {dso['hours_viz']}")
         # add distance for this queries that use distance or n/a
         # format distance to 1 decimal place if it's a number
@@ -395,7 +403,8 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
         # skip filter by score
 
     # sort
-    VALID_SORTS = { "name", "catalog", "class", "constellation_abbr", "type", "hours_viz", "vis_mag", "coverage", "rise_time", "transit_time", "set_time"}
+    VALID_SORTS = { "score", "name", "catalog", "class", "constellation_abbr", "type", "hours_viz", "vis_mag", 
+                            "coverage", "rise_time", "transit_time", "set_time"}
 
     if sort_key == 'rise_time':
         sort_key = 'rise_time_sort' # use sortable version of rise time

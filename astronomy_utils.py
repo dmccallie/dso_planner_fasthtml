@@ -16,6 +16,39 @@ MIN_AIRMASS = 2.9 # hide targets greater than this
 MIN_ALT_FOR_COLOR = 20 # min altitude to show color on map
 DEFAULT_TIMEZONE = "America/Chicago"  # default timezone if none provided
 
+
+def _clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(max_value, value))
+
+
+def score_observation_target(air_mass: float, magnitude: float, fov_coverage: float) -> float:
+    """
+    Score a target for observation quality on a 0.0 to 10.0 scale.
+
+    Inputs:
+    - air_mass: 1.0 is best, 2.5+ is worst
+    - magnitude: smaller is brighter; >11 is too dim
+    - fov_coverage: ideal is 100; up to 300 is acceptable
+    """
+    # Air mass: 1.0 -> 1.0, 2.5 -> 0.0
+    air_score = _clamp((2.5 - float(air_mass)) / 1.5, 0.0, 1.0)
+
+    # Magnitude: -1 -> 1.0, 11 -> 0.0
+    mag_score = _clamp((11.0 - float(magnitude)) / 12.0, 0.0, 1.0)
+
+    # FOV coverage: best at 100, gently degrade to 0.4 at 300, then to 0.0 by 700
+    fov = float(fov_coverage)
+    diff = abs(fov - 100.0)
+    if diff <= 200.0:
+        fov_score = 1.0 - (diff / 200.0) * 0.6
+    else:
+        fov_score = 0.4 - ((diff - 200.0) / 400.0) * 0.4
+    fov_score = _clamp(fov_score, 0.0, 1.0)
+
+    # Weighted blend, tuned to favor air mass and brightness
+    score_01 = (0.45 * air_score) + (0.35 * mag_score) + (0.20 * fov_score)
+    return round(_clamp(score_01, 0.0, 1.0) * 10.0, 3)
+
 stellarium_object_types = [
     ("all", "All Types"),
     # ("G", "Galaxy"),

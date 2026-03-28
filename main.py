@@ -764,6 +764,35 @@ def default_Td(col: ColumnConfig, row: dict) -> FT:
 
     return Td(Safe(val), **attrs)
 
+def formatted_Td(col: ColumnConfig, row: dict, format: str) -> FT:
+    """Default TD renderer that honors col.width / col.style / col.cls and col.color_scale."""
+    attrs = {}
+    style_accum = []
+
+    if col.width:
+        style_accum.append(f"width:{col.width}")
+    if col.style:
+        style_accum.append(col.style)
+
+    val = row.get(col.name)
+    if val is not None:
+        val = format.format(val)
+
+    if col.color_scale and val is not None:
+        rgb = col.color_scale.as_rgb_tuple(val)
+        bg  = col.color_scale.as_css(val)
+        fg  = best_text_color(rgb)
+        style_accum.append(f"background:{bg}")
+        style_accum.append(f"color:{fg}")
+
+    style_str = merge_styles(*style_accum)
+    if style_str:
+        attrs['style'] = style_str
+    if col.cls:
+        attrs['class'] = col.cls
+
+    return Td(Safe(val), **attrs)
+
 def altAzi_Td(col: ColumnConfig, row: dict) -> FT:
     """Custom TD for alt/azitude that honors col.width / col.style / col.cls and col.color_scale.
        Uses colname_azi as a numeric value for color scaling, but colname for display.
@@ -874,11 +903,14 @@ COL_FIGS: list[ColumnConfig]= [
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
-    # ColumnConfig("mag", "Magnitude", "6%", None, True, None),
+    ColumnConfig(name="vis_mag", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Mag",
+        renderTd_fn = lambda col, row: formatted_Td(col, row, "{:.1f}")
+    ),
 
     # ColumnConfig("size", "Size", "12%", None, False, None), # nn x nn
-    ColumnConfig(name="coverage", width="4%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
-        header_fn = lambda col, row: "FOV %",
+    ColumnConfig(name="coverage", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "Fov%",
         renderTd_fn = lambda col, row: default_Td(col, row)
     ),
 
@@ -896,10 +928,10 @@ COL_FIGS: list[ColumnConfig]= [
     #     renderTd_fn = lambda col, row: default_Td(col, row)
     # ),
 
-    # ColumnConfig(name="score", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=CS_ALT,
-    #     header_fn = lambda col, row: "SCR",
-    #     renderTd_fn = lambda col, row: default_Td(col, row)
-    # ),
+    ColumnConfig(name="score", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
+        header_fn = lambda col, row: "SCR",
+        renderTd_fn = lambda col, row: formatted_Td(col, row, "{:.1f}")
+    ),
 
     ColumnConfig(name="distance", width="3%", style="text-align:center;", cls=None, sortable=True, color_scale=None,
         header_fn = lambda col, row: "Dist",
