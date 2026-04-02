@@ -34,6 +34,9 @@ def score_observation_target(air_mass: float, magnitude: float, fov_coverage: fl
     air_score = _clamp((2.5 - float(air_mass)) / 1.5, 0.0, 1.0)
 
     # Magnitude: -1 -> 1.0, 11 -> 0.0
+    # if mag = 99, means unknown so just set to 11.0 to avoid outliers skewing the score
+    if magnitude >= 99:
+        magnitude = 11.0
     mag_score = _clamp((11.0 - float(magnitude)) / 12.0, 0.0, 1.0)
 
     # FOV coverage: best at 100, gently degrade to 0.4 at 300, then to 0.0 by 700
@@ -46,7 +49,7 @@ def score_observation_target(air_mass: float, magnitude: float, fov_coverage: fl
     fov_score = _clamp(fov_score, 0.0, 1.0)
 
     # Weighted blend, tuned to favor air mass and brightness
-    score_01 = (0.45 * air_score) + (0.35 * mag_score) + (0.20 * fov_score)
+    score_01 = (0.35 * air_score) + (0.35 * mag_score) + (0.30 * fov_score)
     return round(_clamp(score_01, 0.0, 1.0) * 10.0, 3)
 
 stellarium_object_types = [
@@ -570,7 +573,7 @@ def _calculate_sensor_fov_amin(pixel_scale: float, sensor_width_px: int, sensor_
     sensor_height_amin = (pixel_scale * sensor_height_px) / 60.0
     return (sensor_width_amin, sensor_height_amin)
 
-@cache
+# @cache
 def calculate_sensor_fov_amin(focal_length_mm: float, pixel_size_um: float,
     sensor_width_px: int, sensor_height_px: int) -> Tuple[float, float]:
     if focal_length_mm <= 0 or pixel_size_um <= 0 or sensor_width_px <= 0 or sensor_height_px <= 0:
@@ -579,12 +582,24 @@ def calculate_sensor_fov_amin(focal_length_mm: float, pixel_size_um: float,
     return _calculate_sensor_fov_amin(pixel_scale, sensor_width_px, sensor_height_px)
 
 
-def calculate_fov(focal_length_mm: float, sensor_width_mm: float, sensor_height_mm: float) -> Tuple[float, float]:
+# simple camera "True" FOV in degrees based on focal length and sensor size (mm)
+# assumes all values present and valid - should be validated before calling
+# @cache
+def calculate_camera_fov(focal_length_mm: float, sensor_width_mm: float, sensor_height_mm: float) -> Tuple[float, float, float]:
     # fov = 2 * arctan(sensor dimension / (2 * focal length))
     # returned value is in degrees
     fov_width = 2 * math.degrees(math.atan((sensor_width_mm / 2) / focal_length_mm))
     fov_height = 2 * math.degrees(math.atan((sensor_height_mm / 2) / focal_length_mm))
-    return (fov_width, fov_height)
+    fov_diag = math.sqrt(fov_width**2 + fov_height**2)
+    return (fov_width, fov_height, fov_diag)
+
+def calculate_eyepiece_fov(eyepiece_focal_length_mm: float, telescope_focal_length_mm: float, eyepiece_afov: float) -> float:
+    # true FOV = AFOV / magnification, where magnification = telescope focal length / eyepiece focal length
+    # note that using field stop would be more accurate, but we don't have that data for most eyepieces, so we'll use AFOV as an approximation
+    # assumes all values present and valid - should be validated before calling
+    true_fov = eyepiece_afov / (telescope_focal_length_mm / eyepiece_focal_length_mm)
+    return true_fov
+
 
 def calculate_fov_pixels(sensor_width_mm: float, sensor_height_mm: float, pixel_size_um: float) -> Tuple[int, int]:
     # calculate number of pixels in width and height based on sensor size and pixel size
@@ -594,7 +609,7 @@ def calculate_fov_pixels(sensor_width_mm: float, sensor_height_mm: float, pixel_
     return (width_pixels, height_pixels)
 
 # sensor coverage is an approx percentage that DSO takes up on the sensor
-@cache  #FIXME does this help?
+# @cache  #FIXME does this help?
 def get_sensor_coverage(dso_min_axis: float, dso_maj_axis: float,
     sensor_width_amin:float, sensor_height_amin:float) -> float:
 

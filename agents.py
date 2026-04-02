@@ -158,10 +158,11 @@ single_agent_astro_plan = Agent(
 
     - Here are instructions on extracting equipement details from user input:
         - When the user provides a nickname, common abbreviation, or product name for astronomy equipment,
-            you should infer detailed specifications about specific telescopes and specific cameras.
-        - Your end goal is to find telescope focal length and f-ratio, and camera sensor size and pixel size.
-        - If there is only information for telescope or camera, return just that part.
-        - If you can only find partial information, return what you can.
+            you should infer detailed specifications about specific telescopes and specific cameras or eyepieces.
+        - Your end goal is to find telescope focal length and f-ratio,
+            and camera sensor size and pixel size or eyepiece apparent field of view and eyepiece focal length.
+        - If the user only supplies information for telescope or camera or eyepiece, return just that part.
+        - If you can only find partial information on telescope or camera or eyepiece, return what you can.
         - If the user's query references the Ruisinger telescope, or the telescope at Powell Observatory,
              use telescope name "Ruisinger 30", with focal length 3700mm and f-ratio 4.9
         - If the user's query references the "Babydome" use telescope name Babydome,
@@ -245,6 +246,7 @@ async def custom_instructions(ctx: RunContext[AstroDependencies]) -> str:
         - default location: {ctx.deps.default_location}
         - default latitude: {ctx.deps.default_latitude}
         - default longitude: {ctx.deps.default_longitude}
+        - default elevation: {ctx.deps.default_elevation} meters
     - Use the following run-time defaults when inferring missing date and time information:
         - default date: {ctx.deps.default_date}
         - default time: {ctx.deps.default_time}
@@ -252,6 +254,7 @@ async def custom_instructions(ctx: RunContext[AstroDependencies]) -> str:
     - Use the following run-time defaults when inferring missing equipment information:
         - default telescope: {ctx.deps.default_telescope}
         - default camera: {ctx.deps.default_camera}
+        - default eyepiece: {ctx.deps.default_eyepiece}
     - Use the following run-time defaults when inferring missing DSO altitude range information:
         - default minimum altitude: {ctx.deps.default_min_altitude} degrees
         - default maximum altitude: {ctx.deps.default_max_altitude} degrees

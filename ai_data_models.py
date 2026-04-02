@@ -48,8 +48,10 @@ class AstroDependencies:
     default_time: str = datetime.datetime.now(ZoneInfo(default_timezone)).strftime("%H:%M") # now time in HH:MM
     default_timezone: str = default_timezone
     # defaults for equipment
-    default_telescope: str = "Astrophysics 130EDF F6.3"
+    default_telescope: str = "Ruisinger 30 inch"
     default_camera: str = "ZWO ASI 2600MC Pro"
+    # for eyepiece, default to None
+    default_eyepiece: Optional[str] = None
     # defaults for DSO alitude range
     default_min_altitude: float = 20.0  # in degrees, to avoid objects too close to the horizon
     default_max_altitude: float = 90.0 # can set lower to avoid telescope pointing too high to reach eyepiece
@@ -66,9 +68,15 @@ class Telescope(BaseModel):
     focal_length_mm: int = Field(..., description="The focal length of the telescope in millimeters")
     f_ratio: PositiveFloat
 
+class Eyepiece(BaseModel):
+    name: str
+    focal_length_mm: int = Field(..., description="The focal length of the eyepiece in millimeters")
+    apparent_fov_deg: PositiveFloat = Field(..., description="The apparent field of view of the eyepiece in degrees")
+
 class Equipment(BaseModel):
     telescope: Optional[Telescope] = None
     camera: Optional[Camera] = None
+    eyepiece: Optional[Eyepiece] = None
 
 class ObserverContext(BaseModel):
     location: str = Field(..., description="The location and/or site name as specified by the user, in string form. For example: 'Backyard in Stilwell, KS'.")

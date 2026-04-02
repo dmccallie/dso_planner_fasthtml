@@ -31,7 +31,7 @@ from starlette.responses import Response
 from ai_data_models import AstroDependencies, DSOInfoQuery, SA_Plan, DSOInfo
 from color_utils import ColorScale, HSL_Green_Scale, best_text_color, MapPlotLibColorScale
 
-from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_dso_positions, get_data_for_dso_moon_chart, \
+from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR, calculate_camera_fov, calculate_dso_positions, get_data_for_dso_moon_chart, \
     stellarium_object_types, DEFAULT_TIMEZONE
 
 # our data access layer
@@ -335,11 +335,19 @@ LOC_PARAM_MAP = {
     "hstart": "hours_start",
     "hend": "hours_end",
     "scope_name": "scope_name",
-    "camera_name": "camera_name",
     "fl_mm": "fl_mm",
+
+    "camera_name": "camera_name",
     "px_um": "px_um",
     "rows": "rows",
     "cols": "cols",
+
+    "eyepiece_name": "eyepiece_name",
+    "eyepiece_focal_length_mm": "eyepiece_focal_length_mm",
+    "eyepiece_apparent_fov_deg": "eyepiece_apparent_fov_deg",
+
+    "fov_source": "fov_source",
+
     "min_altitude": "min_altitude",
     "max_altitude": "max_altitude",
     "ai_text": "ai_text",
@@ -396,6 +404,16 @@ def normalize_loc(loc: dict) -> dict:
     except (TypeError, ValueError):
         loc['cols'] = 0
 
+    try:
+        loc['apparent_fov_deg'] = float(loc.get('apparent_fov_deg')) # type: ignore
+    except (TypeError, ValueError):
+        loc['apparent_fov_deg'] = 0.0  # default apparent field of view
+    
+    try:
+        loc['eyepiece_focal_length_mm'] = int(loc.get('eyepiece_focal_length_mm')) # type: ignore   
+    except (TypeError, ValueError):
+        loc['eyepiece_focal_length_mm'] = 0  # default eyepiece focal length
+
     # make sure min/max altitude are floats and within reasonable bounds (0 to 90)
     try:
         min_alt = float(loc.get('min_altitude')) # type: ignore
@@ -432,6 +450,7 @@ def get_loc(req, response: Response | None = None) -> dict:
 def get_filters_from_mapping(qp) -> dict:
     # print(f"\nGet Filters Request URL: {req.url}")
     # e.g. http://localhost:5001/table?q=lisa&region=All&active=any&cat_Gamma=on&min_score=0&max_score=100
+
     q = (qp.get("q") or "").strip()
     a_constellation = qp.get("constellation") or "all"
     constellation = [a_constellation] # convert item to list, with "all" meaning no filtering
@@ -453,7 +472,7 @@ def get_filters_from_mapping(qp) -> dict:
     if not object_types or len(object_types) == 0:
         object_types = ["all"]
 
-    sortname = qp.get("sortname") or "dso_id"
+    sortname = qp.get("sortname") or "ra_dd"
     order = qp.get("order") or "asc"
     d = dict(q=q, constellation=constellation, active_sel=active_sel,
                 min_hours_viz=min_hours_viz, min_coverage=min_coverage, max_coverage=max_coverage,
@@ -494,9 +513,29 @@ def localization_bar(loc: dict, oob=False) -> FT:
 
     lat_lon_elev = f"{lat}, {lon}, {elevation}m"
     date_time_details = f"{hours_start}, {timezone}"
-    scope_details = f"FL {fl_mm} mm"
-    camera_details = f"{rows} rows, {cols} cols, {px_um}\u00b5m"
+    scope_details = f"{loc.get('scope_name') or 'Scope'} {fl_mm} mm"
+    camera_details = f"{loc.get('camera_name') or 'Camera'}: {rows} rows, {cols} cols, {px_um}\u00b5m"
     # degree symbol is \u00b0, micro symbol is \u00b5
+    
+    # if we have tele FL and sensor data we can calc camera FOV
+    if fl_mm and fl_mm > 0 and rows and rows > 0 and \
+        cols and cols > 0 and px_um and px_um > 0:
+        # calculate sensor size in mm
+        sensor_width_mm = (cols * px_um) / 1000
+        sensor_height_mm = (rows * px_um) / 1000
+        fw, fh, fd = calculate_camera_fov(fl_mm, sensor_width_mm, sensor_height_mm)
+        camera_details += f", FOV {fw:.2f}\u00b0 x {fh:.2f}\u00b0 x {fd:.2f}\u00b0" 
+
+    eyepiece_details = f"{loc.get('eyepiece_name') or 'Eyepiece'}: FL {loc.get('eyepiece_focal_length_mm') or 0} mm, \
+        AFOV {loc.get('eyepiece_apparent_fov_deg') or 0}\u00b0"
+    # if we have eyepiece FL and AFOV and scope FL we can calc magnification and true FOV
+    eyeFL = int(loc.get('eyepiece_focal_length_mm') or 0)
+    if fl_mm and fl_mm > 0 and loc.get('eyepiece_focal_length_mm') and eyeFL > 0 and loc.get('eyepiece_apparent_fov_deg'):
+        magnification = fl_mm / eyeFL
+        true_fov = (loc.get('eyepiece_apparent_fov_deg') or 0) / magnification
+        eyepiece_details += f", Mag {magnification:.1f}x, TFOV {true_fov:.2f}\u00b0"
+
+    
     altitude_details = f"Min: {min_altitude}\u00b0, Max: {max_altitude}\u00b0"
     ai_text = loc.get("ai_text") or ""
     ai_query = loc.get("sql_query") or ""
@@ -518,16 +557,20 @@ def localization_bar(loc: dict, oob=False) -> FT:
                     Span(date_time_details, cls="locbar-detail")
                 ),
                 Div(cls="locbar-item")(
-                    Strong(loc.get("scope_name") or "Scope", cls="locbar-title"),
+                    Strong("Telescope", cls="locbar-title"),
                     Span(scope_details, cls="locbar-detail")
                 ),
                 Div(cls="locbar-item")(
-                    Strong("DSO Altitude", cls="locbar-title"),
+                    Strong("Altitude Limits", cls="locbar-title"),
                     Span(altitude_details, cls="locbar-detail")
                 ),
                 Div(cls="locbar-item")(
-                    Strong(loc.get("camera_name") or "Camera", cls="locbar-title"),
+                    Strong("Camera", cls="locbar-title"),
                     Span(camera_details, cls="locbar-detail")
+                ),
+                Div(cls="locbar-item")(
+                    Strong("Eyepiece", cls="locbar-title"),
+                    Span(eyepiece_details, cls="locbar-detail")
                 ),
             ),
         ),
@@ -553,17 +596,18 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
     return Form(
             id="filters-form",
             hx_swap_oob="true" if oob else "false", # update with new Table other than full index page
-            # hx_get=table.to(frump="trump",sort=filters.get("sort", "ra_dd"), order=filters.get("order", "asc")),  # was index,  # was table
+            # hx_get=table.to(sort=filters.get("sort", "ra_dd"), order=filters.get("order", "asc")),  # was index,  # was table
             hx_get=table, # was index,  # was table
             # have target include the current values of sort and order- doesnt work
             # hx_params="*", 
-            hx_target="#table", # was "#content",  # was #table now includes filter and table
+            hx_target="#table",
             hx_swap="outerHTML",
             hx_push_url="true",
             hx_trigger=(
                 "input changed delay:500ms from:input, "
                 "change delay:300ms from:select, "
                 "change delay:200ms from:input[type=checkbox]"
+                "change delay:200ms from:input[type=radio]"
             ),
 
         )(
@@ -610,6 +654,20 @@ def filter_form(filters: dict, loc: dict, oob=False) -> FT:
                 Fieldset(cls="classes-fieldset")(
                     Legend("Classes"),
                     Div(*[classes_box(c) for c in CLASSES], cls="cats"),
+                ),
+                Fieldset(cls="classes-fieldset")(
+                    Legend("Choose FOV"),
+                    Div(cls="cats")(
+                        # radio button to choose use_eyepiece or use_camera for FOV
+                        Label(Input(type="radio", name="fov_source", value="eyepiece",
+                                    enabled=bool(loc.get("eyepiece_focal_length_mm") and loc.get("eyepiece_apparent_fov_deg")),
+                                     checked=(filters.get("fov_source")!="camera"),
+                                     cls="filter-ctl"), "Eyepiece"),
+                        Label(Input(type="radio", name="fov_source", value="camera",
+                                    enabled=bool(loc.get("fl_mm") and loc.get("rows") and loc.get("cols") and loc.get("px_um")),
+                                     checked=(filters.get("fov_source")=="camera"),
+                                     cls="filter-ctl"), "Camera")
+                    )
                 ),
                 Div(cls="filter-actions")(
                     Button("Reset", cls="secondary", type="button", onclick="window.location.href='/'"),
@@ -689,6 +747,15 @@ def loc_form(loc: dict) -> FT:
                     Label("Pixel size (µm)",   Input(name="px_um", value=loc.get("px_um") or "")),
                     Label("Sensor rows", Input(name="rows", value=loc.get("rows") or "")),
                     Label("Sensor cols", Input(name="cols", value=loc.get("cols") or "")),
+                ),
+                cls="loc-section"
+            ),
+            Fieldset(
+                Legend("Eyepiece"),
+                Div(cls="loc-fields")(
+                    Label("Eyepiece",       Input(name="eyepiece_name", value=loc.get("eyepiece_name") or "")),
+                    Label("Focal length (mm)",   Input(name="eyepiece_focal_length_mm", value=loc.get("eyepiece_focal_length_mm") or "")),
+                    Label("Apparent FOV (°)", Input(name="eyepiece_apparent_fov_deg", value=loc.get("eyepiece_apparent_fov_deg") or "")),
                 ),
                 cls="loc-section"
             ),
@@ -1103,6 +1170,7 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
         default_location="Powell Observatory, Kansas", # this should be findable 
         default_telescope="Ruisinger",
         default_camera="ZWO ASI 2600MC",
+        default_eyepiece= None,
         default_min_altitude=20.0,
         default_max_altitude=90.0,
     )
@@ -1118,6 +1186,8 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
         updated_deps.default_location = loc["site_name"]
     if loc.get("scope_name"):
         updated_deps.default_telescope = loc["scope_name"]
+    if loc.get("eyepiece_name"):
+        updated_deps.default_eyepiece = loc["eyepiece_name"]
     if loc.get("camera_name"):
         updated_deps.default_camera = loc["camera_name"]
     if loc.get("elevation"):
@@ -1161,6 +1231,10 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
             loc['rows'] = result.output.equipment.camera.sensor_rows
             loc['cols'] = result.output.equipment.camera.sensor_columns
             loc['camera_name'] = result.output.equipment.camera.name
+        if result.output.equipment and result.output.equipment.eyepiece:
+            loc['eyepiece_name'] = result.output.equipment.eyepiece.name
+            loc['eyepiece_focal_length_mm'] = result.output.equipment.eyepiece.focal_length_mm
+            loc['eyepiece_apparent_fov_deg'] = result.output.equipment.eyepiece.apparent_fov_deg
         if result.output.valid_plan:
             ai_query = result.output.sql_query
         else:

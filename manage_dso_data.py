@@ -12,7 +12,7 @@ from random import random
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from astronomy_utils import ai_localize_dso, calculate_pixel_scale, calculate_rise_transit_set_fast, calculate_sensor_fov_amin, find_all_twilight_times, get_sensor_coverage, ra_dec_to_altaz_airmass_multiple_times, score_observation_target
+from astronomy_utils import ai_localize_dso, calculate_camera_fov, calculate_eyepiece_fov, calculate_pixel_scale, calculate_rise_transit_set_fast, calculate_sensor_fov_amin, find_all_twilight_times, get_sensor_coverage, ra_dec_to_altaz_airmass_multiple_times, score_observation_target
 
 from astronomy_utils import MIN_AIRMASS, MIN_ALT_FOR_COLOR
 
@@ -83,11 +83,16 @@ def get_localized_dso_data(session_id: str, db_path: Path, sql_query: str, obser
     assert session_id is not None and session_id.strip() != "", "Session ID is required to fetch localized DSO data"
     assert observer_lat is not None, "Observer latitude is required to fetch localized DSO data"
     assert observer_lon is not None, "Observer longitude is required to fetch localized DSO data"
-    assert elevation is not None, "Observer elevation is required to fetch localized DSO data"
+    # assert elevation is not None, "Observer elevation is required to fetch localized DSO data"
     assert observe_date_str is not None and observe_date_str.strip() != "", "Observe date is required to fetch localized DSO data"
     assert observe_time_str is not None and observe_time_str.strip() != "", "Observe time is required to fetch localized DSO data"
     assert timezone is not None and timezone.strip() != "", "Timezone is required to fetch localized DSO data"
 
+    # if elevation is missing, just use sea level
+    if elevation is None:
+        elevation = 0.0
+        print("Elevation not provided, defaulting to sea level (0.0 meters)")
+        
     # first time, make sure the localized dso table and indexes exist
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -216,18 +221,37 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
     print(f"Expand dso data and apply dynamic filters and sorting to {len(dso_list)} localized DSO records for session with localization {localization} and filters {filters}")
 
     # precompute sensor size in arcmin if we have the needed localization params, since it's used in the loop
-    if localization.get('fl_mm', None) is not None and \
-        localization.get('px_um', 0.0) != 0.0 and \
-        localization.get('rows', 0) != 0 and \
-        localization.get('cols', 0) != 0:
-        # compute pixel scale in arcsec/pixel
-        fl_mm = localization['fl_mm']
-        px_um = localization['px_um']
-        fov_width_px = localization['cols']
-        fov_height_px = localization['rows']
-        width_amin, height_amin = calculate_sensor_fov_amin(fl_mm, px_um,fov_width_px, fov_height_px)
-    else:
-        width_amin, height_amin = None, None
+    # if using camera-based FOV, we need focal length, pixel size, and sensor dimensions to calculate the FOV in arcmin, which is needed for coverage calculation
+    width_amin, height_amin = None, None
+    if localization.get('fov_source', 'default') == 'eyepiece':
+        if localization.get('eyepiece_focal_length_mm', None) is not None and \
+            localization.get('eyepiece_apparent_fov_deg', None) is not None and \
+            localization.get('fl_mm', 0.0) != 0.0:
+            # compute true FOV in arcmin
+            eye_focal_length_mm = localization['eyepiece_focal_length_mm']
+            tele_fl_mm = localization['fl_mm']
+            apparent_fov_deg = localization['eyepiece_apparent_fov_deg']
+            tfov_deg = calculate_eyepiece_fov(eye_focal_length_mm, tele_fl_mm, apparent_fov_deg)
+            width_amin = tfov_deg * 60 # convert to arcmin
+            height_amin = tfov_deg * 60 # assume square FOV for eyepiece since we don't have sensor dimensions
+            print(f"Calculated eyepiece FOV of ({width_amin:.1f} x {height_amin:.1f} arcmin) based on tele FL {tele_fl_mm} mm and eye FL {eye_focal_length_mm} mm and apparent FOV {apparent_fov_deg} degrees")
+        else:
+            width_amin, height_amin = None, None
+
+    elif localization.get('fov_source', 'default') == 'camera':
+        if localization.get('fl_mm', None) is not None and \
+            localization.get('px_um', 0.0) != 0.0 and \
+            localization.get('rows', 0) != 0 and \
+            localization.get('cols', 0) != 0:
+            # compute pixel scale in arcsec/pixel
+            fl_mm = localization['fl_mm']
+            px_um = localization['px_um']
+            fov_width_px = localization['cols']
+            fov_height_px = localization['rows']
+            width_amin, height_amin = calculate_sensor_fov_amin(fl_mm, px_um,fov_width_px, fov_height_px)
+            print(f"Calculated camera FOV of ({width_amin:.1f} x {height_amin:.1f} arcmin) based on focal length {fl_mm} mm, pixel size {px_um} um, and sensor dimensions {fov_width_px} x {fov_height_px} pixels")
+        else:
+            width_amin, height_amin = None, None
 
     for dso in dso_list:
         

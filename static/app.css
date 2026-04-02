@@ -28,9 +28,9 @@ fieldset { border:1px solid gray; padding:.4rem; border-radius:.3rem; }
   gap: .2rem;
   margin-bottom: 0;
 }
-.post-query-filters input:not([type="checkbox"]) {
+/* .post-query-filters input:not([type="checkbox"]) {
   margin-bottom: 10px;
-}
+} */
 
 .post-query-filters > .filter-row {
   display: block;
@@ -56,10 +56,8 @@ fieldset { border:1px solid gray; padding:.4rem; border-radius:.3rem; }
   box-sizing: border-box;
 }
 .post-query-filters > .filter-row.actions-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: inline-flex;
   gap: .5rem .6rem;
-  align-items: center;
 }
 .post-query-filters .classes-fieldset {
   min-width: 0;
@@ -97,8 +95,8 @@ fieldset { border:1px solid gray; padding:.4rem; border-radius:.3rem; }
 .locbar-grid {
   flex: 1;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: .5rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .6rem .3rem;
 }
 .locbar-item {
   min-width: 0;
@@ -211,7 +209,7 @@ dialog.modal .grid2 {
 }
 dialog.modal .loc-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   gap: .85rem 1rem;
 }
 dialog.modal .loc-section {
@@ -222,6 +220,7 @@ dialog.modal .loc-fields {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: .6rem .9rem;
 }
+
 dialog.modal .loc-fields:has(> :nth-child(2):last-child) {
   grid-template-columns: 1fr;
 }
@@ -240,6 +239,8 @@ dialog.modal select,
 dialog.modal textarea {
   width: 100%;
   box-sizing: border-box;
+  padding: 8px;
+  font-size: 0.9rem;
 }
 
 /* Footer buttons */
