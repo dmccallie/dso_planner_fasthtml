@@ -247,6 +247,9 @@ async def custom_instructions(ctx: RunContext[AstroDependencies]) -> str:
         - default latitude: {ctx.deps.default_latitude}
         - default longitude: {ctx.deps.default_longitude}
         - default elevation: {ctx.deps.default_elevation} meters
+    - Use the following run-time defaults when user refers to relative time or date terms like "tonight", "tomorrow", "in 2 hours", etc.:
+         - default today date: {ctx.deps.default_today}
+         - default now time: {ctx.deps.default_now}
     - Use the following run-time defaults when inferring missing date and time information:
         - default date: {ctx.deps.default_date}
         - default time: {ctx.deps.default_time}

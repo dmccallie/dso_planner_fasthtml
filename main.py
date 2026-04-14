@@ -354,6 +354,13 @@ LOC_PARAM_MAP = {
     "sql_query": "sql_query"
 }
 
+AI_ONLY_LOC_PARAMS = {
+    "site_name", "lat", "lon", "elevation", "timezone",
+    "scope_name", "fl_mm",
+    "camera_name", "px_um", "rows", "cols",
+    "eyepiece_name", "eyepiece_focal_length_mm", "eyepiece_apparent_fov_deg",
+}
+
 def _parse_bool(val: str|None, *, default=False) -> bool:
     if val is None:
         return default
@@ -700,11 +707,11 @@ def loc_form(loc: dict) -> FT:
             Fieldset(
                 Legend("Site"),
                 Div(cls="loc-fields")(
-                    Label("Site name",   Input(name="site_name", value=loc.get("site_name") or "")),
-                    Label("Latitude",    Input(name="lat", value=loc.get("lat") or "")),
-                    Label("Longitude",   Input(name="lon", value=loc.get("lon") or "")),
-                    Label("Elevation (m)", Input(name="elevation", value=loc.get("elevation") or "")),
-                    Label("Time zone",   Select(name="timezone", style={"width":"fit-content"})(
+                    Label("Site name",   Input(name="site_name", value=loc.get("site_name") or "", readonly=True)),
+                    Label("Latitude",    Input(name="lat", value=loc.get("lat") or "", readonly=True)),
+                    Label("Longitude",   Input(name="lon", value=loc.get("lon") or "", readonly=True)),
+                    Label("Elevation (m)", Input(name="elevation", value=loc.get("elevation") or "", readonly=True)),
+                    Label("Time zone",   Select(name="timezone", style={"width":"fit-content"}, disabled=True)(
                         Option("UTC", value="UTC", selected=(loc.get("timezone")=="UTC")),
                         # Option("Local (auto-detect)", value="local", selected=(loc.get("timezone")=="local")),
                         Option("America/New_York", value="America/New_York", selected=(loc.get("timezone")=="America/New_York")),
@@ -712,8 +719,39 @@ def loc_form(loc: dict) -> FT:
                         Option("America/Denver", value="America/Denver", selected=(loc.get("timezone")=="America/Denver")),
                         Option("America/Los_Angeles", value="America/Los_Angeles", selected=(loc.get("timezone")=="America/Los_Angeles")),
                     )),
+                    Small("Updated by AI Text only. Mention a city/site in your prompt to change these values.", cls="loc-note"),
                 ),
-                cls="loc-section"
+                cls="loc-section ai-managed"
+            ),
+            Fieldset(
+                Legend("Telescope"),
+                Div(cls="loc-fields")(
+                    Label("Telescope",    Input(name="scope_name", value=loc.get("scope_name") or "", readonly=True)),
+                    Label("Focal length (mm)", Input(name="fl_mm", value=loc.get("fl_mm") or "", readonly=True)),
+                    Small("Updated by AI Text only. Mention telescope/equipment details in your prompt.", cls="loc-note"),
+                ),
+                cls="loc-section ai-managed"
+            ),
+            Fieldset(
+                Legend("Camera"),
+                Div(cls="loc-fields")(
+                    Label("Camera",       Input(name="camera_name", value=loc.get("camera_name") or "", readonly=True)),
+                    Label("Pixel size (µm)",   Input(name="px_um", value=loc.get("px_um") or "", readonly=True)),
+                    Label("Sensor rows", Input(name="rows", value=loc.get("rows") or "", readonly=True)),
+                    Label("Sensor cols", Input(name="cols", value=loc.get("cols") or "", readonly=True)),
+                    Small("Updated by AI Text only. Mention camera details in your prompt.", cls="loc-note"),
+                ),
+                cls="loc-section ai-managed"
+            ),
+            Fieldset(
+                Legend("Eyepiece"),
+                Div(cls="loc-fields")(
+                    Label("Eyepiece",       Input(name="eyepiece_name", value=loc.get("eyepiece_name") or "", readonly=True)),
+                    Label("Focal length (mm)",   Input(name="eyepiece_focal_length_mm", value=loc.get("eyepiece_focal_length_mm") or "", readonly=True)),
+                    Label("Apparent FOV (°)", Input(name="eyepiece_apparent_fov_deg", value=loc.get("eyepiece_apparent_fov_deg") or "", readonly=True)),
+                    Small("Updated by AI Text only. Mention eyepiece details in your prompt.", cls="loc-note"),
+                ),
+                cls="loc-section ai-managed"
             ),
             Fieldset(
                 Legend("Date"),
@@ -725,37 +763,10 @@ def loc_form(loc: dict) -> FT:
                 cls="loc-section"
             ),
             Fieldset(
-                Legend("Telescope"),
-                Div(cls="loc-fields")(
-                    Label("Telescope",    Input(name="scope_name", value=loc.get("scope_name") or "")),
-                    Label("Focal length (mm)", Input(name="fl_mm", value=loc.get("fl_mm") or "")),
-                ),
-                cls="loc-section"
-            ),
-            Fieldset(
                 Legend("DSO Altitude Range"),
                 Div(cls="loc-fields")(
                     Label("Min Altitude (°)",    Input(name="min_altitude", value=loc.get("min_altitude") or "")),
                     Label("Max Altitude (°)", Input(name="max_altitude", value=loc.get("max_altitude") or "")),
-                ),
-                cls="loc-section"
-            ),
-            Fieldset(
-                Legend("Camera"),
-                Div(cls="loc-fields")(
-                    Label("Camera",       Input(name="camera_name", value=loc.get("camera_name") or "")),
-                    Label("Pixel size (µm)",   Input(name="px_um", value=loc.get("px_um") or "")),
-                    Label("Sensor rows", Input(name="rows", value=loc.get("rows") or "")),
-                    Label("Sensor cols", Input(name="cols", value=loc.get("cols") or "")),
-                ),
-                cls="loc-section"
-            ),
-            Fieldset(
-                Legend("Eyepiece"),
-                Div(cls="loc-fields")(
-                    Label("Eyepiece",       Input(name="eyepiece_name", value=loc.get("eyepiece_name") or "")),
-                    Label("Focal length (mm)",   Input(name="eyepiece_focal_length_mm", value=loc.get("eyepiece_focal_length_mm") or "")),
-                    Label("Apparent FOV (°)", Input(name="eyepiece_apparent_fov_deg", value=loc.get("eyepiece_apparent_fov_deg") or "")),
                 ),
                 cls="loc-section"
             ),
@@ -1162,8 +1173,12 @@ async def ai_update_loc_and_generate_sql(loc: dict, filters: dict) -> dict:
 
     updated_deps = AstroDependencies(
         # make sure these defaults are 'now' at runtime
-        # note this should be CLIENT "now" not server!
-        # if loc has a date and time, use that as the default for the AI agent, otherwise use current date and time
+        # note this should be CLIENT "now" not server!]
+        # now and today are used for relative ai commands like "what's visible tonight?" or "what's up in the next few hours?"
+        default_now=datetime.now(ZoneInfo("America/Chicago")).strftime("%H:%M"),
+        default_today=datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d"),
+        
+        # if loc has a date and time, use that as the default for the AI agent
         default_time=datetime.now(ZoneInfo("America/Chicago")).strftime("%H:%M"),
         default_date=datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d"),
         default_timezone="America/Chicago",
@@ -1264,7 +1279,14 @@ async def save_loc(req):
     form = await req.form()
     form_data = dict(form) if form else dict(req.query_params)
 
+    # Site, Telescope, Camera, and Eyepiece fields are AI-managed only.
+    stripped_ai_managed_params = [k for k in AI_ONLY_LOC_PARAMS if k in form_data]
+    for key in stripped_ai_managed_params:
+        form_data.pop(key, None)
+
     print(f"/loc/save got form data: {form_data}") # dumps all Loc and Filter fields
+    if stripped_ai_managed_params:
+        print(f"/loc/save ignored AI-only params: {stripped_ai_managed_params}")
 
     loc = normalize_loc(_merge_loc(read_loc_session(req), form_data))
 
@@ -1324,7 +1346,7 @@ async def index(req, sortname: str = "dso_id", order: str = "asc") -> FT:
     print(f"Got FULL /index HTTP request with sort:{sortname} and returning full page")
 
     page = Titled(
-        "FastHTML + HTMX Demo - AI version",
+        "DSO Planner - AI version",
         Link(rel="stylesheet", href="/static/app.css?v=1"),
         content,
         Div(id="table-spinner", cls="table-spinner")(

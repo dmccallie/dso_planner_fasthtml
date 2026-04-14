@@ -227,6 +227,17 @@ dialog.modal .loc-fields:has(> :nth-child(2):last-child) {
 dialog.modal .loc-ai {
   grid-column: 1 / -1;
 }
+dialog.modal .ai-managed input[readonly],
+dialog.modal .ai-managed select[disabled] {
+  background: #a4afb9;
+  color: #3f4a52;
+  cursor: not-allowed;
+}
+dialog.modal .ai-managed .loc-note {
+  grid-column: 1 / -1;
+  color: #5f6a72;
+  font-size: 0.82rem;
+}
 dialog.modal label {
   display: flex;
   flex-direction: column;

@@ -32,6 +32,19 @@ if (window.htmx) {
   });
 }
 
+// In AI Text, Enter submits the localization form; Shift+Enter inserts a newline.
+document.body.addEventListener("keydown", (e) => {
+  const target = e.target;
+  if (!(target instanceof HTMLTextAreaElement)) return;
+  if (target.name !== "ai_text") return;
+  if (target.form?.id !== "loc-form") return;
+  if (e.key !== "Enter") return;
+  if (e.shiftKey || e.isComposing) return;
+
+  e.preventDefault();
+  target.form.requestSubmit();
+});
+
 
 // code added to persist sortname and order into hidden fields and localStorage
 // so that filter changes do not reset current sort

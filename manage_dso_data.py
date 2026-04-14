@@ -224,9 +224,9 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
     # if using camera-based FOV, we need focal length, pixel size, and sensor dimensions to calculate the FOV in arcmin, which is needed for coverage calculation
     width_amin, height_amin = None, None
     if localization.get('fov_source', 'default') == 'eyepiece':
-        if localization.get('eyepiece_focal_length_mm', None) is not None and \
-            localization.get('eyepiece_apparent_fov_deg', None) is not None and \
-            localization.get('fl_mm', 0.0) != 0.0:
+        if localization.get('eyepiece_focal_length_mm', 0) is not 0 and \
+            localization.get('eyepiece_apparent_fov_deg', 0) is not 0 and \
+            localization.get('fl_mm', 0) != 0:
             # compute true FOV in arcmin
             eye_focal_length_mm = localization['eyepiece_focal_length_mm']
             tele_fl_mm = localization['fl_mm']
@@ -239,7 +239,7 @@ def expand_dso_data_and_apply_dynamic_filters_and_sorting(dso_list: list[dict], 
             width_amin, height_amin = None, None
 
     elif localization.get('fov_source', 'default') == 'camera':
-        if localization.get('fl_mm', None) is not None and \
+        if localization.get('fl_mm', 0) != 0 and \
             localization.get('px_um', 0.0) != 0.0 and \
             localization.get('rows', 0) != 0 and \
             localization.get('cols', 0) != 0:

@@ -44,6 +44,10 @@ class AstroDependencies:
     default_longitude: float = -94.7000 # -94.7073
     default_elevation: float = 300.0  # in meters, for atmospheric calculations, etc.
     # FIXME this should reflect the browser not the server!
+    # today and now will be used for relative offsets in the AI command (like "now", "tonight")
+    default_today: str = datetime.datetime.now(ZoneInfo(default_timezone)).strftime("%Y-%m-%d")
+    default_now: str = datetime.datetime.now(ZoneInfo(default_timezone)).strftime("%H:%M") # now time in HH:MM
+    # default date/time will be what's on the localization form, if not provided by user.
     default_date: str = datetime.datetime.now(ZoneInfo(default_timezone)).strftime("%Y-%m-%d")
     default_time: str = datetime.datetime.now(ZoneInfo(default_timezone)).strftime("%H:%M") # now time in HH:MM
     default_timezone: str = default_timezone
