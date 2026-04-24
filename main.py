@@ -75,6 +75,11 @@ WIKIPEDIA_USER_AGENT = "dso_planner_fasthtml/0.1 (Wikipedia image lookup)"
 async def ensure_session_middleware(req, call_next):
     response = await call_next(req)
     if req.url.path.startswith("/static/"):
+        if DEBUG:
+            # Development ergonomics: always fetch the latest static assets.
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         return response
     ensure_session_id(req, response)
     return response

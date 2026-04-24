@@ -83,21 +83,19 @@ class SkyMapViewer {
         // Projection state
         this.yaw = 0;
         this.pitch = 0;
+        this.roll = 0;
         this.scaleValue = 200;
 
-        // upMode added for 'drag view' mode (instead of drag time)
-        this.upMode = options.upMode || 'zenith'; // 'zenith', 'celestial-north', 'compass-up'
+        // Drag-look state. Horizontal drag rotates around zenith; vertical drag moves zenith on center line.
+        this.viewYawDeg = 0;
+        this.zenithYTargetPx = null;
 
-        // added for 'drag view' mode (instead of drag time)
-        // Camera/view offsets (degrees). These are RELATIVE to your time-based baseYaw.
-        this.viewYawDeg   = this.viewYawDeg   ?? 0;
-        this.viewPitchDeg = this.viewPitchDeg ?? 0;
-
-        // Optional: baseline pitch for your default orientation (often 0).
-        this.basePitchDeg = this.basePitchDeg ?? 0;
-
-        // If you support "west-left/right" flipping, set this to +1 or -1.
-        this.xSign = this.xSign ?? -1;
+        // Drag tuning and clipping.
+        this.xSign = options.xSign ?? -1;
+        this.minPitchDeg = -85;
+        this.maxPitchDeg = 85;
+        this.zenithYMinPx = Math.round(this.height * 0.08);
+        this.zenithYMaxPx = this.height / 2;
         
         // Time management
         this.curVirtualTime = new Date();
@@ -371,6 +369,7 @@ class SkyMapViewer {
         
         const zoomHandler = d3.zoom()
             .scaleExtent([100, 3000])
+            .filter((event) => event.type === 'wheel')
             .on('zoom', (event) => this.zoomed(event));
         
         d3.select(this.canvas).call(zoomHandler);
@@ -381,9 +380,19 @@ class SkyMapViewer {
     calibrate(long, lat) {
         const xy1 = this.projection([long, lat]);
         const xy2 = this.projection([long + 5, lat + 5]);
+
+        if (!xy1 || !xy2) {
+            const fallbackDegPerPixel = (180 * Math.SQRT2) / (Math.PI * this.projection.scale());
+            return [fallbackDegPerPixel * 3600, fallbackDegPerPixel];
+        }
         
         const pixelsPerDegreeRA = (xy1[0] - xy2[0]) / 5.0;
         const pixelsPerDegreeDec = (xy1[1] - xy2[1]) / 5.0;
+
+        if (Math.abs(pixelsPerDegreeRA) < 1e-9 || Math.abs(pixelsPerDegreeDec) < 1e-9) {
+            const fallbackDegPerPixel = (180 * Math.SQRT2) / (Math.PI * this.projection.scale());
+            return [fallbackDegPerPixel * 3600, fallbackDegPerPixel];
+        }
         
         const arcsecPerPixelRA = 3600 / pixelsPerDegreeRA;
         const degreesPerPixelDec = 1 / pixelsPerDegreeDec;
@@ -419,133 +428,245 @@ class SkyMapViewer {
         this.draw();
     }
 
-    // drag by view (moving your head) (new approach)
+    // drag by view (moving your head)
     draggedLook(event) {
-        // Initialize view offsets if not set - start from current rotation
-        if (this.viewYawDeg === undefined) {
-            const currentRotation = this.projection.rotate();
-            this.viewYawDeg = 0;
-            this.viewPitchDeg = 0;
-            this.basePitchDeg = currentRotation[1] || 0; // Start from current pitch
-            
-            // Calculate initial roll from current state to avoid jump
-            const currentYaw = currentRotation[0] || 0;
-            const currentPitch = currentRotation[1] || 0;
-            this.lastRoll = this.calculateZenithUpRoll(currentYaw, currentPitch);
+        if (this.zenithYTargetPx === null) {
+            this.syncLookStateToCurrentProjection();
         }
 
-        // Use same coordinate system as working dragged() function
-        const hereLongLat = this.projection.invert ? this.projection.invert([event.x, event.y]) : [0, 0];
-        const [arcsecPerPixelRA, degreesPerPixelDec] = this.calibrate(hereLongLat[0], hereLongLat[1]);
-        
-        // Apply drag movements directly to view offsets (like in dragged())
-        const xSign = (this.xSign ?? 1);
-        this.viewYawDeg   += xSign * (arcsecPerPixelRA / 3600) * event.dx;
-        this.viewPitchDeg -= degreesPerPixelDec * event.dy;
-        
-        // Clamp pitch to avoid gimbal lock
-        this.viewPitchDeg = clamp(this.viewPitchDeg, -89.9, 89.9);
+        const degPerPixel = this.getHorizontalDragDegreesPerPixel(event);
+        const xSign = this.xSign ?? 1;
+        this.viewYawDeg = wrapDeg(this.viewYawDeg + xSign * degPerPixel * event.dx);
 
-        // 3) Get base yaw from time + longitude (do NOT change time in look mode)
+        // Move zenith only along the image center line and never below the image midpoint.
+        this.zenithYTargetPx = clamp(
+            this.zenithYTargetPx + event.dy,
+            this.zenithYMinPx,
+            this.zenithYMaxPx
+        );
+
         const [baseYaw, lstDeg] = this.getYawForTimeAndPlace(this.curVirtualTime, this.observerLong);
+        const yaw = wrapDeg(baseYaw + this.viewYawDeg);
+        const pitch = this.solvePitchForZenithY(yaw, lstDeg, this.zenithYTargetPx);
+        const roll = this.solveRollForZenithCenterline(yaw, pitch, lstDeg);
 
-        // Apply offsets to base values
-        const yaw   = baseYaw + this.viewYawDeg;
-        const pitch = clamp(this.basePitchDeg + this.viewPitchDeg, -89.9, 89.9);
-
-        // Simple "zenith up" roll calculation
-        const roll = this.calculateZenithUpRoll(yaw, pitch, lstDeg);
-
-        // Apply directly to projection like dragged() does
         this.projection.rotate([yaw, pitch, roll]);
-        this.yaw = yaw; this.pitch = pitch; this.roll = roll; 
+        this.yaw = yaw;
+        this.pitch = pitch;
+        this.roll = roll;
 
         this.draw();
     }
 
-    // Simple roll calculation to keep zenith pointing "up" in the viewport
-    // still not close to good enough.
-    calculateZenithUpRoll(yaw, pitch, lstDeg) {
-        // For very small movements, don't recalculate roll to avoid jerkiness
-        const currentRotation = this.projection.rotate();
-        if (this.lastRoll !== undefined) {
-            const yawDiff = Math.abs(currentRotation[0] - (this.lastYaw || 0));
-            const pitchDiff = Math.abs(currentRotation[1] - (this.lastPitch || 0));
-            
-            // If movement is very small, keep previous roll
-            if (yawDiff < 1 && pitchDiff < 1) {
-                return this.lastRoll;
+    getHorizontalDragDegreesPerPixel(event) {
+        const fallbackDegPerPixel = (180 * Math.SQRT2) / (Math.PI * this.projection.scale());
+
+        if (!this.projection.invert) {
+            return fallbackDegPerPixel;
+        }
+
+        const longLat = this.projection.invert([event.x, event.y]);
+        if (!longLat) {
+            return fallbackDegPerPixel;
+        }
+
+        const [arcsecPerPixelRA] = this.calibrate(longLat[0], longLat[1]);
+        const degPerPixel = Math.abs(arcsecPerPixelRA / 3600);
+        return Number.isFinite(degPerPixel) && degPerPixel > 0 ? degPerPixel : fallbackDegPerPixel;
+    }
+
+    getZenithLongLat(lstDeg) {
+        return [this.ra2long(lstDeg / 15.0), this.observerLat];
+    }
+
+    createProjectionForRotation(yaw, pitch, roll = 0) {
+        return d3.geoAzimuthalEqualArea()
+            .scale(this.projection.scale())
+            .translate(this.projection.translate())
+            .center(this.projection.center())
+            .rotate([yaw, pitch, roll])
+            .reflectX(true);
+    }
+
+    projectPointAtRotation(longLat, yaw, pitch, roll = 0) {
+        const tempProjection = this.createProjectionForRotation(yaw, pitch, roll);
+
+        return tempProjection(longLat);
+    }
+
+    getZenithScreenAtRotation(yaw, pitch, roll, lstDeg) {
+        return this.projectPointAtRotation(this.getZenithLongLat(lstDeg), yaw, pitch, roll);
+    }
+
+    getZenithCenteredYForPitch(yaw, pitch, lstDeg) {
+        const zenithNoRoll = this.getZenithScreenAtRotation(yaw, pitch, 0, lstDeg);
+        if (!zenithNoRoll) return null;
+
+        const cx = this.width / 2;
+        const cy = this.height / 2;
+        const radialDistance = Math.hypot(zenithNoRoll[0] - cx, zenithNoRoll[1] - cy);
+
+        return cy - radialDistance;
+    }
+
+    solvePitchForZenithY(yaw, lstDeg, targetY) {
+        let lo = this.minPitchDeg;
+        let hi = this.maxPitchDeg;
+
+        let yLo = this.getZenithCenteredYForPitch(yaw, lo, lstDeg);
+        let yHi = this.getZenithCenteredYForPitch(yaw, hi, lstDeg);
+
+        if (yLo === null || yHi === null) {
+            return clamp(this.pitch, this.minPitchDeg, this.maxPitchDeg);
+        }
+
+        // Normalize bracket ordering for the bisection step.
+        if (yLo > yHi) {
+            [lo, hi] = [hi, lo];
+            [yLo, yHi] = [yHi, yLo];
+        }
+
+        const clampedTargetY = clamp(targetY, yLo, yHi);
+
+        for (let i = 0; i < 16; i++) {
+            const mid = (lo + hi) / 2;
+            const yMid = this.getZenithCenteredYForPitch(yaw, mid, lstDeg);
+            if (yMid === null) break;
+
+            if (yMid < clampedTargetY) {
+                lo = mid;
+            } else {
+                hi = mid;
             }
         }
-        
-        // Zenith in RA/Dec coordinates is at (LST, observer_latitude)
-        const zenithRA = lstDeg; // LST in degrees
-        const zenithDec = this.observerLat; // Observer latitude
-        
-        // Convert zenith RA/Dec to projection coordinates
-        const zenithLong = this.ra2long(zenithRA / 15.0); // Convert to hours first
-        const zenithLat = zenithDec;
-        
-        // Create a temporary projection with no roll to calculate zenith position
-        const tempProjection = d3.geoAzimuthalEqualArea()
-            .scale(this.projection.scale())
-            .center(this.projection.center())
-            .rotate([yaw, pitch, 0]) // No roll for calculation
-            .reflectX(true);
-        
-        // Project zenith point to screen coordinates using temp projection
-        const zenithScreen = tempProjection([zenithLong, zenithLat]);
-        
-        if (!zenithScreen) {
-            // If zenith not visible, smoothly transition to no roll
-            const targetRoll = 0;
-            const smoothingFactor = 0.1;
-            const newRoll = this.lastRoll ? this.lastRoll * (1 - smoothingFactor) + targetRoll * smoothingFactor : targetRoll;
-            this.lastRoll = newRoll;
-            this.lastYaw = yaw;
-            this.lastPitch = pitch;
-            return newRoll;
+
+        return clamp((lo + hi) / 2, this.minPitchDeg, this.maxPitchDeg);
+    }
+
+    solveRollForZenithCenterline(yaw, pitch, lstDeg) {
+        const zenithNoRoll = this.getZenithScreenAtRotation(yaw, pitch, 0, lstDeg);
+        if (!zenithNoRoll) return 0;
+
+        const cx = this.width / 2;
+        const cy = this.height / 2;
+        const dx = zenithNoRoll[0] - cx;
+        const dy = zenithNoRoll[1] - cy;
+
+        if (Math.hypot(dx, dy) < 1e-6) {
+            return this.roll || 0;
         }
-        
-        // Calculate vector from screen center to zenith
-        const centerX = this.width / 2;
-        const centerY = this.height / 2;
-        const dx = zenithScreen[0] - centerX;
-        const dy = zenithScreen[1] - centerY;
-        
-        // Calculate angle to make zenith point "up" (negative Y direction)
-        const targetAngle = -Math.PI / 2; // Pointing up
-        const currentAngle = Math.atan2(dy, dx);
-        
-        // Calculate the roll needed to align zenith with "up"
-        let roll = (targetAngle - currentAngle) * 180 / Math.PI;
-        
-        // Normalize roll to [-180, 180] range
-        while (roll > 180) roll -= 360;
-        while (roll < -180) roll += 360;
-        
-        // Smooth the roll transition to avoid jerkiness
-        if (this.lastRoll !== undefined) {
-            const rollDiff = roll - this.lastRoll;
-            // Handle wraparound
-            if (rollDiff > 180) roll -= 360;
-            if (rollDiff < -180) roll += 360;
-            
-            // Apply smoothing
-            const smoothingFactor = 0.1; // Adjust this value (0.1 = very smooth, 0.9 = very responsive)
-            roll = this.lastRoll * (1 - smoothingFactor) + roll * smoothingFactor;
+
+        const base = Math.atan2(dx, dy) * 180 / Math.PI;
+        const candidates = [base, base + 180, -base, -base + 180];
+
+        let bestRoll = 0;
+        let bestScore = Number.POSITIVE_INFINITY;
+
+        candidates.forEach((candidate) => {
+            const roll = wrapDeg(candidate);
+            const z = this.getZenithScreenAtRotation(yaw, pitch, roll, lstDeg);
+            if (!z) return;
+
+            const xError = Math.abs(z[0] - cx);
+            const belowMidlinePenalty = z[1] > cy ? 100000 + (z[1] - cy) * 1000 : 0;
+            const yTargetPenalty = this.zenithYTargetPx === null ? 0 : Math.abs(z[1] - this.zenithYTargetPx);
+            const score = xError + belowMidlinePenalty + (0.01 * yTargetPenalty);
+
+            if (score < bestScore) {
+                bestScore = score;
+                bestRoll = roll;
+            }
+        });
+
+        return bestRoll;
+    }
+
+    syncLookStateToCurrentProjection() {
+        const [baseYaw, lstDeg] = this.getYawForTimeAndPlace(this.curVirtualTime, this.observerLong);
+        const currentRotation = this.projection.rotate();
+        const currentYaw = currentRotation[0] ?? baseYaw;
+        const currentPitch = currentRotation[1] ?? this.pitch;
+        const currentRoll = (currentRotation[2] ?? this.roll) ?? 0;
+
+        this.viewYawDeg = wrapDeg(currentYaw - baseYaw);
+
+        const zenithScreen = this.getZenithScreenAtRotation(currentYaw, currentPitch, currentRoll, lstDeg);
+        const fallbackY = zenithScreen ? zenithScreen[1] : (this.height / 2);
+        this.zenithYTargetPx = clamp(fallbackY, this.zenithYMinPx, this.zenithYMaxPx);
+    }
+
+    getHorizonVerticalCenterAtRotation(yaw, pitch, roll) {
+        const horizonCoords = this.geoHorizon?.features?.[0]?.geometry?.coordinates?.[0];
+        if (!Array.isArray(horizonCoords) || horizonCoords.length === 0) {
+            return null;
         }
-        
-        // Store for next calculation
-        this.lastRoll = roll;
-        this.lastYaw = yaw;
-        this.lastPitch = pitch;
-        
-        return roll;
+
+        const tempProjection = this.createProjectionForRotation(yaw, pitch, roll);
+        let minY = Number.POSITIVE_INFINITY;
+        let maxY = Number.NEGATIVE_INFINITY;
+
+        horizonCoords.forEach((longLat) => {
+            const xy = tempProjection(longLat);
+            if (!xy) return;
+            minY = Math.min(minY, xy[1]);
+            maxY = Math.max(maxY, xy[1]);
+        });
+
+        if (!Number.isFinite(minY) || !Number.isFinite(maxY)) {
+            return null;
+        }
+
+        return (minY + maxY) / 2;
+    }
+
+    applyZoomScale(newScale) {
+        this.scaleValue = clamp(newScale, 100, 3000);
+        this.projection.scale(this.scaleValue);
+
+        if (this.zenithYTargetPx === null) {
+            this.syncLookStateToCurrentProjection();
+        }
+
+        const [baseYaw, lstDeg] = this.getYawForTimeAndPlace(this.curVirtualTime, this.observerLong);
+        const yaw = wrapDeg(baseYaw + this.viewYawDeg);
+
+        // Keep the horizon centered vertically as zoom changes.
+        const desiredHorizonCenterY = this.height / 2;
+        let targetY = this.zenithYTargetPx ?? desiredHorizonCenterY;
+        let pitch = this.pitch;
+        let roll = this.roll;
+
+        for (let i = 0; i < 6; i++) {
+            pitch = this.solvePitchForZenithY(yaw, lstDeg, targetY);
+            roll = this.solveRollForZenithCenterline(yaw, pitch, lstDeg);
+
+            const horizonCenterY = this.getHorizonVerticalCenterAtRotation(yaw, pitch, roll);
+            if (horizonCenterY === null) {
+                break;
+            }
+
+            const errorY = desiredHorizonCenterY - horizonCenterY;
+            if (Math.abs(errorY) < 0.5) {
+                break;
+            }
+
+            targetY = clamp(targetY + 0.9 * errorY, this.zenithYMinPx, this.zenithYMaxPx);
+        }
+
+        this.zenithYTargetPx = targetY;
+        pitch = this.solvePitchForZenithY(yaw, lstDeg, targetY);
+        roll = this.solveRollForZenithCenterline(yaw, pitch, lstDeg);
+
+        this.projection.rotate([yaw, pitch, roll]);
+        this.yaw = yaw;
+        this.pitch = pitch;
+        this.roll = roll;
+
+        this.draw();
     }
     
     dragStarted(event) {
-        // Optional: pause animation during drag
+        this.syncLookStateToCurrentProjection();
     }
     
     dragEnded(event) {
@@ -553,9 +674,7 @@ class SkyMapViewer {
     }
     
     zoomed(event) {
-        this.scaleValue = event.transform.k;
-        this.projection.scale(this.scaleValue);
-        this.draw();
+        this.applyZoomScale(event.transform.k);
     }
     
     clickedCanvas(event) {
@@ -899,9 +1018,18 @@ class SkyMapViewer {
         this.geoHorizon = this.genLocalHorizon(this.curVirtualTime);
         this.geoLocalAltAz = this.genLocalAltAzMesh(this.curVirtualTime, this.observerLong, this.observerLat);
         
-        // Update projection
-        this.projection.rotate([newYaw, this.pitch, 0]);
-        this.yaw = newYaw;
+        // Keep the drag-look orientation consistent while sidereal time advances.
+        if (this.zenithYTargetPx === null) {
+            this.syncLookStateToCurrentProjection();
+        }
+        const yaw = wrapDeg(newYaw + this.viewYawDeg);
+        const pitch = this.solvePitchForZenithY(yaw, mst, this.zenithYTargetPx);
+        const roll = this.solveRollForZenithCenterline(yaw, pitch, mst);
+
+        this.projection.rotate([yaw, pitch, roll]);
+        this.yaw = yaw;
+        this.pitch = pitch;
+        this.roll = roll;
         this.currentMST = mst;
         
         // Redraw
@@ -916,36 +1044,46 @@ class SkyMapViewer {
     gotoHereAndNow() {
         this.curVirtualTime = new Date();
         this.mSecAhead = 0;
+        this.viewYawDeg = 0;
         
         const [yaw, mst] = this.getYawForTimeAndPlace(this.curVirtualTime, this.observerLong);
+        const pitch = clamp(this.pitch, this.minPitchDeg, this.maxPitchDeg);
         
         this.currentMST = mst;
         this.geoHorizon = this.genLocalHorizon(this.curVirtualTime);
         this.geoLocalAltAz = this.genLocalAltAzMesh(this.curVirtualTime, this.observerLong, this.observerLat);
         
-        this.projection.rotate([yaw, this.pitch, 0]);
+        this.projection.rotate([yaw, pitch, 0]);
         this.yaw = yaw;
+        this.pitch = pitch;
+        this.roll = 0;
+
+        const zenithScreen = this.getZenithScreenAtRotation(yaw, pitch, 0, mst);
+        const fallbackY = zenithScreen ? zenithScreen[1] : (this.height / 2);
+        this.zenithYTargetPx = clamp(fallbackY, this.zenithYMinPx, this.zenithYMaxPx);
         
         this.draw();
     }
     
     adjustPitch(delta) {
-        const newPitch = Math.max(-90, Math.min(90, this.pitch + delta));
+        const newPitch = clamp(this.pitch + delta, this.minPitchDeg, this.maxPitchDeg);
         this.projection.rotate([this.yaw, newPitch, 0]);
         this.pitch = newPitch;
+        this.roll = 0;
+        this.syncLookStateToCurrentProjection();
         this.draw();
     }
     
     adjustYaw(delta) {
-        this.yaw += delta;
+        this.yaw = wrapDeg(this.yaw + delta);
         this.projection.rotate([this.yaw, this.pitch, 0]);
+        this.roll = 0;
+        this.syncLookStateToCurrentProjection();
         this.draw();
     }
     
     adjustZoom(delta) {
-        this.scaleValue = Math.max(100, Math.min(3000, this.scaleValue + delta));
-        this.projection.scale(this.scaleValue);
-        this.draw();
+        this.applyZoomScale(this.scaleValue + delta);
     }
     
     saveAsImage(filename = 'sky-map.png') {
