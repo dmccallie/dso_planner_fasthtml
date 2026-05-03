@@ -16,6 +16,9 @@ import {
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function wrapDeg(d) { return ((d + 180) % 360 + 360) % 360 - 180; }
+function blendWrappedDeg(fromDeg, toDeg, t) {
+    return wrapDeg(fromDeg + wrapDeg(toDeg - fromDeg) * t);
+}
 
 function cameraBasis(yawDeg, pitchDeg) {
   const y = (Math.PI/180)*yawDeg, p = (Math.PI/180)*pitchDeg;
@@ -92,10 +95,14 @@ class SkyMapViewer {
 
         // Drag tuning and clipping.
         this.xSign = options.xSign ?? -1;
-        this.minPitchDeg = -85;
-        this.maxPitchDeg = 85;
-        this.zenithYMinPx = Math.round(this.height * 0.08);
-        this.zenithYMaxPx = this.height / 2;
+        this.minPitchDeg = -89;
+        this.maxPitchDeg = 89;
+        this.zenithYMinPx = -this.height; // Zenith can scroll far above the viewport
+        this.zenithYMaxPx = this.height / 2; // Zenith cannot go below viewport center
+        this.rollFreezeInnerPx = options.rollFreezeInnerPx ?? 20;
+        this.rollFreezeOuterPx = options.rollFreezeOuterPx ?? 40;
+        this.rollBlendOuterPx = options.rollBlendOuterPx ?? 80;
+        this.rollLockActive = false;
         
         // Time management
         this.curVirtualTime = new Date();
@@ -368,7 +375,7 @@ class SkyMapViewer {
         d3.select(this.canvas).call(dragHandler);
         
         const zoomHandler = d3.zoom()
-            .scaleExtent([100, 3000])
+            .scaleExtent([50, 3000])
             .filter((event) => event.type === 'wheel')
             .on('zoom', (event) => this.zoomed(event));
         
@@ -438,17 +445,31 @@ class SkyMapViewer {
         const xSign = this.xSign ?? 1;
         this.viewYawDeg = wrapDeg(this.viewYawDeg + xSign * degPerPixel * event.dx);
 
-        // Move zenith only along the image center line and never below the image midpoint.
+        const [baseYaw, lstDeg] = this.getYawForTimeAndPlace(this.curVirtualTime, this.observerLong);
+        const yaw = wrapDeg(baseYaw + this.viewYawDeg);
+
         this.zenithYTargetPx = clamp(
             this.zenithYTargetPx + event.dy,
             this.zenithYMinPx,
             this.zenithYMaxPx
         );
 
-        const [baseYaw, lstDeg] = this.getYawForTimeAndPlace(this.curVirtualTime, this.observerLong);
-        const yaw = wrapDeg(baseYaw + this.viewYawDeg);
         const pitch = this.solvePitchForZenithY(yaw, lstDeg, this.zenithYTargetPx);
+
+        // console.log(`  Solved pitch=${pitch.toFixed(2)} for targetY=${this.zenithYTargetPx.toFixed(2)}`);
+        
         const roll = this.solveRollForZenithCenterline(yaw, pitch, lstDeg);
+
+        // for debugging
+        const zenithNoRoll = this.getZenithScreenAtRotation(yaw, pitch, 0, lstDeg);
+        const cx = this.width / 2;
+        const cy = this.height / 2;
+        const dx = zenithNoRoll[0] - cx;
+        const dy = zenithNoRoll[1] - cy;
+        const currentRoll = this.roll ?? 0;
+        const centerDistancePx = Math.hypot(dx, dy);
+        console.log(`  Solved roll=${roll.toFixed(2)} when zenith is ${centerDistancePx.toFixed(2)}px from center`);
+        // end debugging
 
         this.projection.rotate([yaw, pitch, roll]);
         this.yaw = yaw;
@@ -460,19 +481,7 @@ class SkyMapViewer {
 
     getHorizontalDragDegreesPerPixel(event) {
         const fallbackDegPerPixel = (180 * Math.SQRT2) / (Math.PI * this.projection.scale());
-
-        if (!this.projection.invert) {
-            return fallbackDegPerPixel;
-        }
-
-        const longLat = this.projection.invert([event.x, event.y]);
-        if (!longLat) {
-            return fallbackDegPerPixel;
-        }
-
-        const [arcsecPerPixelRA] = this.calibrate(longLat[0], longLat[1]);
-        const degPerPixel = Math.abs(arcsecPerPixelRA / 3600);
-        return Number.isFinite(degPerPixel) && degPerPixel > 0 ? degPerPixel : fallbackDegPerPixel;
+        return fallbackDegPerPixel;
     }
 
     getZenithLongLat(lstDeg) {
@@ -510,33 +519,62 @@ class SkyMapViewer {
     }
 
     solvePitchForZenithY(yaw, lstDeg, targetY) {
-        let lo = this.minPitchDeg;
-        let hi = this.maxPitchDeg;
+        const samples = [];
+        const sampleCount = 180;
+        const currentPitch = clamp(this.pitch, this.minPitchDeg, this.maxPitchDeg);
+        const continuityWeight = 0.4;
 
-        let yLo = this.getZenithCenteredYForPitch(yaw, lo, lstDeg);
-        let yHi = this.getZenithCenteredYForPitch(yaw, hi, lstDeg);
+        for (let i = 0; i <= sampleCount; i++) {
+            const t = i / sampleCount;
+            const pitch = this.minPitchDeg + t * (this.maxPitchDeg - this.minPitchDeg);
+            const y = this.getZenithCenteredYForPitch(yaw, pitch, lstDeg);
+            if (y === null || !Number.isFinite(y)) continue;
+            samples.push({ pitch, y });
+        }
 
-        if (yLo === null || yHi === null) {
+        if (samples.length === 0) {
             return clamp(this.pitch, this.minPitchDeg, this.maxPitchDeg);
         }
 
-        // Normalize bracket ordering for the bisection step.
-        if (yLo > yHi) {
-            [lo, hi] = [hi, lo];
-            [yLo, yHi] = [yHi, yLo];
+        let minY = Number.POSITIVE_INFINITY;
+        let maxY = Number.NEGATIVE_INFINITY;
+        let bestPitch = samples[0].pitch;
+        let bestError = Number.POSITIVE_INFINITY;
+
+        for (const sample of samples) {
+            minY = Math.min(minY, sample.y);
+            maxY = Math.max(maxY, sample.y);
         }
 
-        const clampedTargetY = clamp(targetY, yLo, yHi);
+        const clampedTargetY = clamp(targetY, minY, maxY);
 
-        for (let i = 0; i < 16; i++) {
-            const mid = (lo + hi) / 2;
-            const yMid = this.getZenithCenteredYForPitch(yaw, mid, lstDeg);
-            if (yMid === null) break;
+        for (const sample of samples) {
+            const error = Math.abs(sample.y - clampedTargetY);
+            const continuityPenalty = continuityWeight * Math.abs(sample.pitch - currentPitch);
+            const score = error + continuityPenalty;
+            if (score < bestError) {
+                bestError = score;
+                bestPitch = sample.pitch;
+            }
+        }
 
-            if (yMid < clampedTargetY) {
-                lo = mid;
+        const localWindow = (this.maxPitchDeg - this.minPitchDeg) / sampleCount;
+        let lo = clamp(bestPitch - localWindow, this.minPitchDeg, this.maxPitchDeg);
+        let hi = clamp(bestPitch + localWindow, this.minPitchDeg, this.maxPitchDeg);
+
+        const pitchError = (pitch) => {
+            const y = this.getZenithCenteredYForPitch(yaw, pitch, lstDeg);
+            if (y === null || !Number.isFinite(y)) return Number.POSITIVE_INFINITY;
+            return Math.abs(y - clampedTargetY) + (continuityWeight * Math.abs(pitch - currentPitch));
+        };
+
+        for (let i = 0; i < 18; i++) {
+            const m1 = lo + (hi - lo) / 3;
+            const m2 = hi - (hi - lo) / 3;
+            if (pitchError(m1) <= pitchError(m2)) {
+                hi = m2;
             } else {
-                hi = mid;
+                lo = m1;
             }
         }
 
@@ -551,13 +589,29 @@ class SkyMapViewer {
         const cy = this.height / 2;
         const dx = zenithNoRoll[0] - cx;
         const dy = zenithNoRoll[1] - cy;
+        const currentRoll = this.roll ?? 0;
+        const centerDistancePx = Math.hypot(dx, dy);
+        const innerRadiusPx = this.rollFreezeInnerPx ?? 20;
+        const outerRadiusPx = Math.max(innerRadiusPx + 1, this.rollFreezeOuterPx ?? 40);
+        const blendOuterPx = Math.max(outerRadiusPx + 1, this.rollBlendOuterPx ?? 80);
 
-        if (Math.hypot(dx, dy) < 1e-6) {
-            return this.roll || 0;
+        if (this.rollLockActive) {
+            if (centerDistancePx > outerRadiusPx) {
+                this.rollLockActive = false;
+            }
+        } else if (centerDistancePx < innerRadiusPx) {
+            this.rollLockActive = true;
+        }
+
+        // Near zenith-center the orientation is numerically ill-conditioned, so
+        // preserve the current roll instead of switching branches.
+        if (this.rollLockActive) {
+            return currentRoll;
         }
 
         const base = Math.atan2(dx, dy) * 180 / Math.PI;
-        const candidates = [base, base + 180, -base, -base + 180];
+        const candidates = [base, base + 180, -base, -base + 180, currentRoll];
+        const continuityWeight = clamp(64 / centerDistancePx, 0.5, 8);
 
         let bestRoll = 0;
         let bestScore = Number.POSITIVE_INFINITY;
@@ -570,13 +624,24 @@ class SkyMapViewer {
             const xError = Math.abs(z[0] - cx);
             const belowMidlinePenalty = z[1] > cy ? 100000 + (z[1] - cy) * 1000 : 0;
             const yTargetPenalty = this.zenithYTargetPx === null ? 0 : Math.abs(z[1] - this.zenithYTargetPx);
-            const score = xError + belowMidlinePenalty + (0.01 * yTargetPenalty);
+            const continuityPenalty = continuityWeight * Math.abs(wrapDeg(roll - currentRoll));
+            const score = xError + belowMidlinePenalty + (0.01 * yTargetPenalty) + continuityPenalty;
 
             if (score < bestScore) {
                 bestScore = score;
                 bestRoll = roll;
             }
         });
+
+        if (centerDistancePx < blendOuterPx) {
+            const linearT = clamp(
+                (centerDistancePx - innerRadiusPx) / (blendOuterPx - innerRadiusPx),
+                0,
+                1
+            );
+            const blendT = linearT * linearT * (3 - (2 * linearT));
+            return blendWrappedDeg(currentRoll, bestRoll, blendT);
+        }
 
         return bestRoll;
     }
@@ -592,7 +657,7 @@ class SkyMapViewer {
 
         const zenithScreen = this.getZenithScreenAtRotation(currentYaw, currentPitch, currentRoll, lstDeg);
         const fallbackY = zenithScreen ? zenithScreen[1] : (this.height / 2);
-        this.zenithYTargetPx = clamp(fallbackY, this.zenithYMinPx, this.zenithYMaxPx);
+        this.zenithYTargetPx = Math.min(fallbackY, this.height / 2);
     }
 
     getHorizonVerticalCenterAtRotation(yaw, pitch, roll) {
@@ -620,7 +685,7 @@ class SkyMapViewer {
     }
 
     applyZoomScale(newScale) {
-        this.scaleValue = clamp(newScale, 100, 3000);
+        this.scaleValue = clamp(newScale, 50, 3000);
         this.projection.scale(this.scaleValue);
 
         if (this.zenithYTargetPx === null) {
@@ -650,10 +715,9 @@ class SkyMapViewer {
                 break;
             }
 
-            targetY = clamp(targetY + 0.9 * errorY, this.zenithYMinPx, this.zenithYMaxPx);
+            targetY = clamp(targetY + 0.9 * errorY, this.zenithYMinPx, this.height / 2);
         }
 
-        this.zenithYTargetPx = targetY;
         pitch = this.solvePitchForZenithY(yaw, lstDeg, targetY);
         roll = this.solveRollForZenithCenterline(yaw, pitch, lstDeg);
 
@@ -662,9 +726,13 @@ class SkyMapViewer {
         this.pitch = pitch;
         this.roll = roll;
 
+        // Preserve the zoom-adjusted request instead of resetting to the achieved
+        // screen position, so subsequent drags continue from what the user asked for.
+        this.zenithYTargetPx = targetY;
+
         this.draw();
     }
-    
+
     dragStarted(event) {
         this.syncLookStateToCurrentProjection();
     }
@@ -746,49 +814,137 @@ class SkyMapViewer {
     
     // ============ Drawing functions ============
     
+    // Build a canvas Path2D for the full sphere outline (the bounding circle of the projection).
+    getSphereClipPath() {
+        const path = new Path2D();
+        // d3 renders the sphere outline via geoPath; capture it into a Path2D.
+        const tmpCanvas = document.createElement('canvas');
+        tmpCanvas.width = this.width;
+        tmpCanvas.height = this.height;
+        const tmpCtx = tmpCanvas.getContext('2d');
+        const tmpPath = d3.geoPath().projection(this.projection).context(tmpCtx);
+        tmpCtx.beginPath();
+        tmpPath({ type: 'Sphere' });
+        // Re-create using arc: find the projected centre and radius from the sphere outline.
+        // Simpler: use the projection's translate (canvas centre) and scale.
+        const [cx, cy] = this.projection.translate();
+        // For azimuthal-equal-area, the sphere radius in pixels = scale * sqrt(2)
+        // but we compute it from the actual geoPath bounds for accuracy.
+        // Use the clip radius directly from projection.clipAngle if set, else derive from scale.
+        // AzimuthalEqualArea: radius for 90-deg clip = scale * sqrt(2).
+        // For a full sphere (180 deg) the radius = scale * sqrt(2) * ... actually = scale * 2 * sin(90°/2)*... 
+        // Easiest: radius = projection.scale() * Math.SQRT2
+        const r = this.projection.scale() * Math.SQRT2;
+        path.arc(cx, cy, r, 0, 2 * Math.PI);
+        return { path, cx, cy, r };
+    }
+
+    // Build a canvas Path2D for the local horizon polygon.
+    getHorizonClipPath() {
+        const coords = this.geoHorizon?.features?.[0]?.geometry?.coordinates?.[0];
+        if (!coords || coords.length === 0) return null;
+
+        const path = new Path2D();
+        let first = true;
+        for (const lonLat of coords) {
+            const xy = this.projection(lonLat);
+            if (!xy) continue;
+            if (first) { path.moveTo(xy[0], xy[1]); first = false; }
+            else path.lineTo(xy[0], xy[1]);
+        }
+        path.closePath();
+        return path;
+    }
+
     draw() {
         if (!this.ctx) return;
         
-        // Clear canvas
+        // Clear canvas with ground colour visible outside the sky circle.
         this.ctx.beginPath();
-        this.ctx.fillStyle = "black";
+        this.ctx.fillStyle = '#1a0e00';
         this.ctx.rect(0, 0, this.width, this.height);
         this.ctx.fill();
-        
-        // Draw stars
-        if (this.stars6) {
-            this.drawStars();
-        }
-        
-        // Draw constellation lines
-        if (this.constellationLines) {
-            this.drawConstellationLines();
-        }
-        
-        // Draw DSOs
-        if (this.messier) {
-            this.drawDSOs();
-        }
-        
-        // Draw RA/DEC grid
-        if (this.geoRaDecMesh) {
-            this.drawRADecGrid();
-        }
-        
-        // Draw local horizon
-        if (this.geoHorizon) {
+
+        const { path: spherePath, cx, cy, r } = this.getSphereClipPath();
+        const horizonPath = this.geoHorizon ? this.getHorizonClipPath() : null;
+
+        // --- Sky layer: clip to sphere AND above-horizon area ---
+        this.ctx.save();
+        // Clip to the sphere circle first.
+        this.ctx.beginPath();
+        this.ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+        this.ctx.clip();
+
+        // Fill sky background.
+        this.ctx.fillStyle = 'black';
+        this.ctx.fillRect(0, 0, this.width, this.height);
+
+        if (horizonPath) {
+            // Further clip to the above-horizon polygon so only sky is drawn.
+            this.ctx.save();
+            this.ctx.clip(horizonPath);
+
+            // Draw sky content.
+            if (this.stars6) this.drawStars();
+            if (this.constellationLines) this.drawConstellationLines();
+            if (this.messier) this.drawDSOs();
+            if (this.geoRaDecMesh) this.drawRADecGrid();
+            if (this.geoLocalAltAz) this.drawLocalAltAzLines();
+            if (this.highlightedConstellation) this.drawHighlightedConstellation();
+
+            this.ctx.restore();
+
+            // Draw ground (below horizon) inside the sphere circle.
+            this.ctx.save();
+            // Invert clip: fill the sphere then use even-odd to show only ground.
+            // Simpler: draw a filled rect with the horizon path subtracted.
+            this.ctx.beginPath();
+            this.ctx.rect(0, 0, this.width, this.height);
+            // Walk the horizon path in reverse to create the "ground" region.
+            this.ctx.arc(cx, cy, r + 1, 0, 2 * Math.PI); // redundant since we already clipped
+            this.ctx.fillStyle = '#3a2010';
+            // Use the horizon path as inner boundary (even-odd rule).
+            const coords = this.geoHorizon?.features?.[0]?.geometry?.coordinates?.[0];
+            if (coords) {
+                this.ctx.beginPath();
+                // Draw bounding rect for the whole sphere area.
+                this.ctx.arc(cx, cy, r + 1, 0, 2 * Math.PI, false);
+                // Draw horizon polygon clockwise to create "hole" via even-odd.
+                let first = true;
+                for (let i = coords.length - 1; i >= 0; i--) {
+                    const xy = this.projection(coords[i]);
+                    if (!xy) continue;
+                    if (first) { this.ctx.moveTo(xy[0], xy[1]); first = false; }
+                    else this.ctx.lineTo(xy[0], xy[1]);
+                }
+                this.ctx.closePath();
+                this.ctx.fillStyle = '#3a2010';
+                this.ctx.fill('evenodd');
+            }
+            this.ctx.restore();
+
+            // Draw horizon line on top.
             this.drawHorizon();
+            // Draw cardinal points on top.
+            this.drawLocalAltAzCardinals();
+        } else {
+            // No horizon data yet — draw everything normally.
+            if (this.stars6) this.drawStars();
+            if (this.constellationLines) this.drawConstellationLines();
+            if (this.messier) this.drawDSOs();
+            if (this.geoRaDecMesh) this.drawRADecGrid();
+            if (this.geoLocalAltAz) this.drawLocalAltAz();
+            if (this.highlightedConstellation) this.drawHighlightedConstellation();
         }
-        
-        // Draw local alt/az mesh
-        if (this.geoLocalAltAz) {
-            this.drawLocalAltAz();
-        }
-        
-        // Draw highlighted constellation
-        if (this.highlightedConstellation) {
-            this.drawHighlightedConstellation();
-        }
+
+        this.ctx.restore(); // end sphere clip
+
+        // Draw sphere outline.
+        this.ctx.beginPath();
+        this.ctx.arc(cx, cy, r, 0, 2 * Math.PI);
+        this.ctx.strokeStyle = 'rgba(100, 100, 100, 0.7)';
+        this.ctx.lineWidth = 1.5;
+        this.ctx.stroke();
     }
     
     drawStars() {
@@ -908,14 +1064,20 @@ class SkyMapViewer {
     }
     
     drawLocalAltAz() {
+        this.drawLocalAltAzLines();
+        this.drawLocalAltAzCardinals();
+    }
+
+    drawLocalAltAzLines() {
         this.ctx.beginPath();
         this.ctx.strokeStyle = "rgb(180, 180, 0)";
         this.ctx.lineWidth = 1;
         this.ctx.setLineDash([]);
         this.regularPath(this.geoLocalAltAz);
         this.ctx.stroke();
-        
-        // Draw cardinal points
+    }
+
+    drawLocalAltAzCardinals() {
         this.ctx.beginPath();
         this.ctx.textAlign = "center";
         this.ctx.textBaseline = "middle";
@@ -1044,23 +1206,25 @@ class SkyMapViewer {
     gotoHereAndNow() {
         this.curVirtualTime = new Date();
         this.mSecAhead = 0;
+        // Start facing South (meridian centered, zenith up — South is at the bottom for NH observers).
         this.viewYawDeg = 0;
         
-        const [yaw, mst] = this.getYawForTimeAndPlace(this.curVirtualTime, this.observerLong);
-        const pitch = clamp(this.pitch, this.minPitchDeg, this.maxPitchDeg);
+        const [baseYaw, mst] = this.getYawForTimeAndPlace(this.curVirtualTime, this.observerLong);
+        const yaw = wrapDeg(baseYaw + this.viewYawDeg);
         
         this.currentMST = mst;
         this.geoHorizon = this.genLocalHorizon(this.curVirtualTime);
         this.geoLocalAltAz = this.genLocalAltAzMesh(this.curVirtualTime, this.observerLong, this.observerLat);
         
-        this.projection.rotate([yaw, pitch, 0]);
+        // Place zenith at the vertical center of the canvas.
+        this.zenithYTargetPx = this.height / 2;
+        const pitch = this.solvePitchForZenithY(yaw, mst, this.zenithYTargetPx);
+        const roll = this.solveRollForZenithCenterline(yaw, pitch, mst);
+        
+        this.projection.rotate([yaw, pitch, roll]);
         this.yaw = yaw;
         this.pitch = pitch;
-        this.roll = 0;
-
-        const zenithScreen = this.getZenithScreenAtRotation(yaw, pitch, 0, mst);
-        const fallbackY = zenithScreen ? zenithScreen[1] : (this.height / 2);
-        this.zenithYTargetPx = clamp(fallbackY, this.zenithYMinPx, this.zenithYMaxPx);
+        this.roll = roll;
         
         this.draw();
     }
@@ -1085,6 +1249,7 @@ class SkyMapViewer {
     adjustZoom(delta) {
         this.applyZoomScale(this.scaleValue + delta);
     }
+
     
     saveAsImage(filename = 'sky-map.png') {
         if (!this.canvas) return;
